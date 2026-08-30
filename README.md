@@ -1,58 +1,61 @@
-# IGNIS — Instagram Enhancement Suite
+# IGNIS
 
-A fast, self-contained userscript for high-quality Instagram media downloads.
+IGNIS is a userscript that downloads media straight from Instagram pages. One click saves posts, carousels, reels, stories, highlights, HD profile pictures, captions (.txt), and EXIF metadata. DASH video and audio are merged into a single MP4, so a download is always one file, not two.
 
-- **Instant** — payloads resolve from the page (0 requests) or a single fast API call; downloads start immediately.
-- **Everything** — posts, carousels, reels, stories, highlights, HD profile pictures, captions (.txt), EXIF metadata.
-- **One file, always** — DASH video+audio is merged into a single MP4 via Mediabunny; if merging ever fails it falls back to the single progressive MP4 (audio included). Never separate files.
-- **Reliable** — `GM_xmlhttpRequest` transports, current 2026 Instagram endpoints (REST `api/v1/media/{pk}/info`, doc_id GraphQL, embedded page JSON), sane defaults.
+It runs entirely in your browser. Network requests go only to Instagram and its CDN hosts.
+
+> Personal project, experimental. Anything can change or break without notice.
 
 ## Install
 
-Install the userscript in Tampermonkey / Violentmonkey / Greasemonkey:
+1. Install a userscript manager: Tampermonkey, Violentmonkey, or Greasemonkey.
+2. Open [this install link](https://github.com/mheci/Ignis/releases/latest/download/ignis.user.js) in the manager and confirm the install.
 
-```
-https://github.com/mheci/Ignis/releases/latest/download/ignis.user.js
-```
+3. The script activates automatically on instagram.com pages.
 
-This is the permanent "latest release" link — it always serves the newest stable build.
-
-### Updates
-
-The script declares `@updateURL` / `@downloadURL` pointing at the `releases/latest/download` link above, so your userscript manager checks for new versions automatically. Version bumps are detected by comparing the `@version` header; there is no auto-install — the manager prompts you.
+Updates are automatic. The script declares `@updateURL`/`@downloadURL` pointing at that same link, so your manager compares the `@version` header and prompts you when a new build is out. Nothing installs without your confirmation.
 
 ## Features
 
-- Download posts, carousels, reels, stories and highlights with one click
-- HD profile picture download
-- Thumbnail download for videos
-- Download captions as `.txt`
+- One-click downloads: posts, carousels, reels, stories, highlights
+- HD profile pictures and video thumbnails
+- Captions exported as `.txt`
 - EXIF metadata (artist, post URL, date) on photos
-- DASH merge: highest-quality video + audio into a single MP4
-- Direct download modes (all / visible resource) without dialogs
-- External download mode via `GM_download` for very large files
+- DASH merge: highest-quality video plus audio in a single MP4, with fallback to the progressive MP4
+- Direct download modes without dialogs, plus an external-download mode for very large files
 - Configurable filename templates
-- Local download statistics dashboard (Settings → Statistics): totals, data volume, per-type breakdown — stored only in your browser
-- Command palette (`Ctrl+K`, `Cmd+K` on Mac, or `Alt+K`) for quick access to every action
-- Keyboard: `S` download focused post, `Shift+?` shortcuts, `Alt+W` settings, `Alt+S` download story, `Alt+Z` debug, `Alt+R` reload
+- A local download-statistics dashboard (Settings, Statistics tab), stored only in your browser
+- Command palette (Ctrl+K, Cmd+K, or Alt+K) for quick access to every action
 
-## Settings
+## Keyboard shortcuts
 
-Open Settings from the userscript manager menu (`Alt+W`) — tabs for Downloads and Keyboard, plus an About tab. Right-click the *Auto Rename Files* row to edit the filename template.
+| Shortcut | Action |
+| --- | --- |
+| `S` | Download the focused post |
+| `Alt+W` | Open settings |
+| `Alt+S` | Download a story |
+| `Ctrl+K` / `Cmd+K` / `Alt+K` | Command palette |
+| `Alt+Z` | Debug view |
+| `Alt+R` | Reload |
+| `Shift+?` | Shortcut help |
+
+Open Settings from the userscript manager menu or with `Alt+W`. The Downloads and Keyboard tabs hold most options; right-click the *Auto Rename Files* row in Settings to edit the filename template.
 
 ## Development
 
+`src/` holds six ordered parts (userscript header, media detection, download engine, UI, page injection, boot). `build.js` concatenates them into the single `ignis.user.js`, stripping comments:
+
 ```sh
-node build.js        # concatenates src/part1-6.js, strips comments, emits ignis.user.js
+node build.js          # emits ./ignis.user.js
 node --check ignis.user.js
 ```
 
-A GitHub Actions workflow (`build.yml`) rebuilds the userscript on every push and commits the result, keeping the hosted file in sync.
+`build.js` also accepts an output path as a second argument. A GitHub Actions workflow rebuilds the userscript on every push, and a release is published when the `@version` header changes.
 
 ## Disclaimer
 
-This project is independent and unaffiliated with Instagram or any other project. All processing is local; network requests go only to Instagram/CDN hosts. Download content only when you have the right to do so.
+This project is independent and unaffiliated with Instagram. All processing is local; network requests go only to Instagram and CDN hosts. Download content only when you have the right to do so.
 
 ## License
 
-GPL-3.0-only
+GPL-3.0-only - see [LICENSE](LICENSE).
