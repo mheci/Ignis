@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name               IGNIS — Instagram Enhancement Suite
-// @version            9.6.0
-// @description        IGNIS v9.6: instant high-quality downloads (posts, reels, stories, highlights, HD avatars, DASH video+audio MP4 mux via Mediabunny, captions, EXIF) plus local download statistics and a command palette (Ctrl+K).
+// @version            10.0.0
+// @description        IGNIS v10: high-quality downloads (posts, reels, stories, highlights, HD avatars, DASH video+audio MP4 mux, captions, EXIF), tagged-profile lookup, IndexedDB caches, local statistics, and a rebuilt interface.
 // @author             IGNIS
 // @match              https://*.instagram.com/*
 // @downloadURL        https://github.com/mheci/Ignis/releases/latest/download/ignis.user.js
@@ -29,7 +29,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "9.6.0";
+  const VERSION = "10.0.0";
   const NAME = "IGNIS";
   const $ = jQuery;
 
@@ -83,17 +83,18 @@
     ["FORCE_RESOURCE_VIA_MEDIA", "download", "Fetch via Media API", "Fetches resources via the Media API for the highest quality.", true],
     ["PREFER_DASH_MANIFEST", "download", "Prefer DASH Manifest", "Downloads separate highest-quality video + audio DASH streams and merges them.", true],
     ["FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED", "download", "Fallback if API Throttled", "Falls back to direct links when the Media API is rate-limited.", true],
-    ["NEW_TAB_ALWAYS_FORCE_MEDIA_IN_POST", "download", "Always Use Media API for New Tab", "Always resolves items via the Media API when opening a new tab.", false],
-    ["FORCE_FETCH_ALL_RESOURCES", "download", "Force Fetch All Resources", "Always loads the full post payload from the API for dialogs.", false],
     ["MODIFY_RESOURCE_EXIF", "download", "Add EXIF Metadata", "Adds post URL, date and author to image EXIF.", true],
     ["DOWNLOAD_WITH_CAPTION", "download", "Download with Caption (.txt)", "Also saves the post caption as a .txt file alongside the media.", false],
     ["DIRECT_DOWNLOAD_ALL", "download", "Direct Download All", "Downloads every item of a post immediately, without a dialog.", false],
-    ["DIRECT_DOWNLOAD_STORY", "download", "Direct Download Story", "Downloads all story items immediately, without a dialog.", false],
+    ["DIRECT_DOWNLOAD_STORY", "download", "Direct Download Story", "Downloading a story saves every item immediately, without a dialog.", false],
     ["DIRECT_DOWNLOAD_VISIBLE_RESOURCE", "download", "Download Visible Resource", "Directly downloads only the currently visible carousel item.", false],
-    ["DOWNLOAD_CAROUSEL_ALL", "download", "Download All Carousel Items", "Downloading a carousel post always fetches every item.", false],
     ["DOWNLOAD_STORY_HIGHLIGHTS", "download", "Download Story Highlights", "Story 'Download All' also includes the user's highlights.", false],
+    ["MATCH_VIDEO_FILENAME_TO_THUMBNAIL", "download", "Match Video Name to Thumbnail", "Names video downloads after their thumbnail file instead of the rename template.", false],
+    ["NEW_TAB_HIGHEST_VIDEO", "download", "New Tab Uses Highest Video", "Opens the highest-quality video-only DASH stream in a new tab, without audio.", false],
     ["DOWNLOAD_PROFILE_PIC_HD", "download", "Download HD Profile Pic", "Requests the highest-resolution profile picture available.", true],
     ["USE_EXTERNAL_DOWNLOAD_MODE", "download", "Use External Download Mode", "Downloads via the browser download manager (GM_download) instead of in-memory blobs — best for large videos.", false],
+    ["SKIP_VIEW_STORY_CONFIRM", "download", "Skip View Story Confirmation", "Clicks the confirmation button when Instagram asks whether to view a story.", false],
+    ["SKIP_SHARED_WITH_YOU_DIALOG", "download", "Skip Shared-With-You Dialog", "Closes the 'shared this with you' dialog on ?igsh= links.", false],
     ["KEYBOARD_DOWNLOAD_S", "keyboard", "S Download", "S downloads the focused post.", true],
     ["KEYBOARD_SHORTCUTS_HELP", "keyboard", "Keyboard Shortcuts Help", "Shift+? shows the shortcuts overlay.", true],
     ["COMMAND_PALETTE", "keyboard", "Command Palette", "Ctrl+K (Cmd+K on Mac, Alt+K anywhere) opens the quick command palette.", true],
@@ -117,16 +118,33 @@
     AUTO_RENAME: ["RENAME_PUBLISH_DATE"],
     FORCE_RESOURCE_VIA_MEDIA: [
       "FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED",
-      "NEW_TAB_ALWAYS_FORCE_MEDIA_IN_POST",
       "PREFER_DASH_MANIFEST",
     ],
+    PREFER_DASH_MANIFEST: ["NEW_TAB_HIGHEST_VIDEO"],
   };
 
   const FALLBACK_APP_ID = "936619743392459";
   const IMAGE_CACHE_KEY = "URLS_OF_IMAGES_TEMPORARILY_STORED";
   const IMAGE_CACHE_MAX_AGE = 12 * 60 * 60 * 1000;
-  const IMAGE_MAX_CACHE_ITEMS = 300;
+  const IMAGE_MAX_CACHE_ITEMS = 500;
   const checkInterval = 250;
+
+  const USER_ID_CACHE_KEY = "USER_IDS_STORED";
+  const USER_ID_MAX_CACHE_ITEMS = 1000;
+  const POST_CACHE_MAX_ITEMS = 30;
+  const POST_CACHE_MAX_AGE = 10 * 60 * 1000;
+
+  const PERSISTENT_CACHE_DB_NAME = "IGNIS";
+  const PERSISTENT_CACHE_DB_VERSION = 1;
+  const PERSISTENT_CACHE_STORE_NAME = "DATA_CACHE";
+  const PERSISTENT_CACHE_FLUSH_DELAY = 500;
+
+  const PERSISTENT_CACHE_BINDINGS = {
+    [IMAGE_CACHE_KEY]: "GL_imageCache",
+    [USER_ID_CACHE_KEY]: "GL_userIdCache",
+  };
+
+  const HASTE_BITMAP_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
 
   const SVG = {
     DOWNLOAD: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>',
@@ -135,12 +153,27 @@
     DOWNLOAD_ALL: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/></svg>',
     CLOSE: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
     TEXT: '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>',
+    TAGGED_PROFILES: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></svg>',
+    LIST: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>',
+    SPARK: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="m5.6 5.6 2.1 2.1"/><path d="m16.3 16.3 2.1 2.1"/><path d="m18.4 5.6-2.1 2.1"/><path d="m7.7 16.3-2.1 2.1"/></svg>',
   };
 
   const resourceCountSelector =
     "*:not([data-pagelet])>*:not([role]):not([data-pagelet])>*>*>*[role]>*>ul[class] li[class]";
   const userIdCache = new Map();
+
+  const mediaCache = new Map();
   let $body = $("body");
+
+  const persistentCacheStore = {
+    backend: null,
+    db: null,
+    readyPromise: null,
+    values: new Map(),
+    pending: new Set(),
+    flushTimer: null,
+    flushChain: Promise.resolve(true),
+  };
 
   const state = {
     fileRenameFormat:
@@ -154,9 +187,11 @@
     GL_repeat: null,
     postPoll: null,
     homepageObserverDebounce: null,
-    GL_dataCache: { stories: {}, highlights: {} },
+    GL_storyConfirmSkipped: false,
+    GL_dataCache: { stories: {}, highlights: {}, posts: {}, taggedProfiles: {} },
     GL_payloadCache: {},
     GL_imageCache: {},
+    GL_userIdCache: {},
     GL_mediaDataCache: {},
     busy: 0,
     _igTab: "download",
@@ -348,7 +383,7 @@
     if (u) return u;
 
     var parts = location.pathname.split("/").filter(Boolean);
-    if (parts[0] === "stories" && parts.length >= 2 && !/^\d+$/.test(parts[1])) {
+    if (parts[0] === "stories" && parts.length >= 2 && parts[1] !== "highlights" && !/^\d+$/.test(parts[1])) {
       return cleanName(parts[1]);
     }
     return null;
@@ -619,19 +654,31 @@
       if (typeof v === "number") state[pair[1]] = v;
     });
     state.GL_imageCache = Store.loadImageCache();
+    var cachedIds = Store.get(USER_ID_CACHE_KEY, null);
+    state.GL_userIdCache = cachedIds && typeof cachedIds === "object" && !Array.isArray(cachedIds) ? cachedIds : {};
   }
 
   function decodeMediaIdFromUrl(url) {
     try {
       var u = new URL(url);
       var key = u.searchParams.get("ig_cache_key");
-      if (!key) return null;
-      key = key.split(".")[0];
-      var raw = atob(key.replace(/-/g, "+").replace(/_/g, "/"));
-      return raw || null;
+      if (key) {
+        var raw = atob(key.split(".")[0].replace(/-/g, "+").replace(/_/g, "/"));
+        if (/^\d+$/.test(raw)) return raw.length > 19 ? raw.slice(0, 19) : raw;
+        return raw || null;
+      }
+      var filename = u.pathname.split("/").filter(Boolean).pop() || "";
+      var parts = filename.split(".")[0].split("_");
+      for (var i = parts.length - 1; i >= 0; i--) {
+        if (/^3\d{18}$/.test(parts[i])) return parts[i];
+      }
+      for (var j = parts.length - 1; j >= 0; j--) {
+        if (/^\d{17,20}$/.test(parts[j])) return parts[j];
+      }
     } catch (e) {
       return null;
     }
+    return null;
   }
 
   function parseSrcset(srcset) {
@@ -680,7 +727,8 @@
   function thumbFromDisplayResources(resources) {
     if (!Array.isArray(resources) || !resources.length) return null;
     var sorted = sortCandidatesDescending(resources, "config_width");
-    return sorted[0] ? sorted[0].src : null;
+    var best = sorted[0];
+    return best ? best.src || best.url || null : null;
   }
 
   function captionOf(item) {
@@ -704,8 +752,8 @@
 
     var push = function (node) {
       var it = {
-        id: node.id || node.pk || String(node.media_id || ""),
-        isVideo: !!node.is_video,
+        id: node.pk || node.id || String(node.media_id || ""),
+        isVideo: isReelsMediaVideo(node),
         url: null,
         thumb: null,
         width: 0,
@@ -730,7 +778,7 @@
             it.height = it.height || vRes[0].config_height || 0;
           }
           it.thumb = thumbFromDisplayResources(node.display_resources) ||
-            (node.image_versions2 && node.image_versions2.candidates && node.image_versions2.candidates[0] ? node.image_versions2.candidates[0].url : null) ||
+            thumbFromDisplayResources(node.image_versions2 && node.image_versions2.candidates) ||
             node.display_url || null;
         }
       } else {
@@ -741,8 +789,13 @@
           it.url = imgUrl;
           it.ext = /\.webp(\?|$)/i.test(imgUrl) ? "webp" : "jpg";
           it.thumb = it.url;
-          if (node.display_resources && node.display_resources.length) {
+          var bestImg = sortCandidatesDescending(node.image_versions2 && node.image_versions2.candidates, "width");
+          if (bestImg && bestImg[0]) {
+            it.width = bestImg[0].width || 0;
+            it.height = bestImg[0].height || 0;
+          } else if (node.display_resources && node.display_resources.length) {
             it.width = node.display_resources[node.display_resources.length - 1].config_width || 0;
+            it.height = node.display_resources[node.display_resources.length - 1].config_height || 0;
           }
         }
       }
@@ -764,10 +817,12 @@
   function normalizeReelItems(items) {
     return (items || []).map(function (item) {
       var it = {
-        id: item.id || "",
-        isVideo: !!item.is_video,
+        id: item.pk || item.id || "",
+        isVideo: isReelsMediaVideo(item),
         url: null,
         thumb: null,
+        width: 0,
+        height: 0,
         takenAt: item.taken_at_timestamp || item.taken_at || null,
         caption: typeof item.caption === "string" ? item.caption : null,
         dash: item.video_dash_manifest ? item : null,
@@ -779,13 +834,22 @@
           it.url = vUrl;
           it.ext = "mp4";
         }
-        it.thumb = thumbFromDisplayResources(item.display_resources) || item.display_url || null;
+        it.thumb = thumbFromDisplayResources(item.display_resources) ||
+          thumbFromDisplayResources(item.image_versions2 && item.image_versions2.candidates) ||
+          item.display_url || null;
       } else {
-        var imgUrl = pickImage(item.display_resources) || item.display_url || null;
+        var imgUrl = pickImage(item.display_resources) ||
+          pickImage(item.image_versions2 && item.image_versions2.candidates) ||
+          item.display_url || null;
         if (imgUrl) {
           it.url = imgUrl;
           it.thumb = it.url;
         }
+      }
+      var bestCand = sortCandidatesDescending(item.image_versions2 && item.image_versions2.candidates, "width");
+      if (bestCand && bestCand[0]) {
+        it.width = bestCand[0].width || 0;
+        it.height = bestCand[0].height || 0;
       }
       return it;
     }).filter(function (it) {
@@ -794,6 +858,7 @@
   }
 
   let cachedAppId = null;
+  let graphQLContextCache = { ts: 0, siteData: null, haste: null };
 
   function getAppId(force) {
     if (cachedAppId && !force) return cachedAppId;
@@ -821,6 +886,314 @@
     }
     cachedAppId = result || FALLBACK_APP_ID;
     return cachedAppId;
+  }
+
+  function getCookie(name) {
+    try {
+      var m = document.cookie.match(new RegExp("(?:^|;\\s*)" + name + "=([^;]*)"));
+      return m ? decodeURIComponent(m[1]) : "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function getLSD() {
+    var result = null;
+    $('script[type="application/json"][data-sjs]').each(function () {
+      var m = (this.textContent || "").match(/\["LSD",\[\],\{"token":"([0-9a-z_-]+)"\}/i);
+      if (m && !result) {
+        result = m[1];
+        return false;
+      }
+    });
+    return result;
+  }
+
+  function getBloks() {
+    var result = null;
+    $('script[type="application/json"][data-sjs]').each(function () {
+      var m = (this.textContent || "").match(/"WebBloksVersioningID",\[\],\{"versioningID":"([0-9a-z_-]+)"\}/i);
+      if (m && !result) {
+        result = m[1];
+        return false;
+      }
+    });
+    return result;
+  }
+
+  function getDTSG() {
+    var result = null;
+    $('script[type="application/json"][data-sjs]').each(function () {
+      var m = (this.textContent || "").match(/"DTSGInitialData",\[\],\{"token":"([0-9a-z_:-]+)"\}/i);
+      if (m && !result) {
+        result = m[1];
+        return false;
+      }
+    });
+    return result;
+  }
+
+  function findConfig(data, name) {
+    var stack = [data];
+    while (stack.length) {
+      var node = stack.pop();
+      if (Array.isArray(node)) {
+        if (node[0] === name && node.length >= 3 && node[2] && typeof node[2] === "object" && !Array.isArray(node[2])) {
+          return node[2];
+        }
+        stack.push.apply(stack, node);
+      } else if (node && typeof node === "object") {
+        stack.push.apply(stack, Object.values(node));
+      }
+    }
+    return null;
+  }
+
+  function getSiteData() {
+    var text = null;
+    $('script[type="application/json"][data-sjs]').each(function () {
+      var t = this.textContent || "";
+      if (/"SiteData",\[\],\{/i.test(t)) {
+        text = t;
+        return false;
+      }
+    });
+    if (!text) return null;
+    try {
+      return findConfig(JSON.parse(text), "SiteData");
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function getJazoest(fbDtsg) {
+    if (!fbDtsg) return "";
+    var sum = 0;
+    for (var i = 0; i < fbDtsg.length; i++) sum += fbDtsg.charCodeAt(i);
+    return "2" + sum;
+  }
+
+  function encodeHasteBitMap(indexes) {
+    var bits = [];
+    indexes.forEach(function (index) {
+      if (Number.isInteger(index) && index >= 0) bits[index] = 1;
+    });
+    if (!bits.length) return "";
+    var gamma = function (num) {
+      var binary = num.toString(2);
+      return "0".repeat(binary.length - 1) + binary;
+    };
+    var lastValue = bits[0] || 0;
+    var runLength = 1;
+    var output = String(lastValue);
+    for (var i = 1; i < bits.length; i++) {
+      var value = bits[i] || 0;
+      if (value === lastValue) runLength++;
+      else {
+        output += gamma(runLength);
+        lastValue = value;
+        runLength = 1;
+      }
+    }
+    output += gamma(runLength);
+    var chunks = (output + "00000").match(/[01]{6}/g) || [];
+    return chunks
+      .map(function (chunk) {
+        return HASTE_BITMAP_ALPHABET[parseInt(chunk, 2)];
+      })
+      .join("");
+  }
+
+  function parseHasteResourceIndexes(value) {
+    if (typeof value !== "string" || value[0] !== ":") return [];
+    return value
+      .slice(1)
+      .split(",")
+      .map(function (item) {
+        return parseInt(item, 10);
+      })
+      .filter(Number.isInteger);
+  }
+
+  function getHasteBitMapParams() {
+    var dynIndexes = new Set();
+    var hasteIndexes = { __csr: new Set(), __hsdp: new Set(), __hblp: new Set(), __sjsp: new Set() };
+    var addHasteIndex = function (name, index) {
+      if (!hasteIndexes[name]) hasteIndexes[name] = new Set();
+      hasteIndexes[name].add(index);
+    };
+    var resources = [];
+    var csrOn = true;
+
+    var isDefineList = function (value) {
+      return Array.isArray(value) &&
+        value.every(function (entry) {
+          return Array.isArray(entry) && typeof entry[0] === "string";
+        });
+    };
+
+    var walk = function (data) {
+      var stack = [data];
+      while (stack.length) {
+        var node = stack.pop();
+        if (Array.isArray(node)) {
+          if (node[0] === "AsyncData" && node[1] === "resolve") continue;
+          if (node[0] === "BootloaderConfig" && node[2] && typeof node[2] === "object" && "csrOn" in node[2]) {
+            csrOn = !!node[2].csrOn;
+          }
+          stack.push.apply(stack, node);
+          continue;
+        }
+        if (!node || typeof node !== "object") continue;
+        if (isDefineList(node.define)) {
+          node.define.forEach(function (entry) {
+            if (Number.isInteger(entry[3]) && entry[3] >= 0) dynIndexes.add(entry[3]);
+          });
+        }
+        if (typeof node.phd2_indexes === "string") {
+          parseHasteResourceIndexes(node.phd2_indexes).forEach(function (index) {
+            addHasteIndex("__sjsp", index);
+          });
+        }
+        if (node.indexUpgrades && typeof node.indexUpgrades === "object") {
+          Object.keys(node.indexUpgrades).forEach(function (name) {
+            parseHasteResourceIndexes(node.indexUpgrades[name]).forEach(function (index) {
+              addHasteIndex(name, index);
+            });
+          });
+        }
+        if (node.rsrcMap && typeof node.rsrcMap === "object") {
+          resources.push.apply(resources, Object.values(node.rsrcMap));
+        }
+        stack.push.apply(stack, Object.values(node));
+      }
+    };
+
+    document.querySelectorAll('script[type="application/json"][data-sjs]').forEach(function (script) {
+      try {
+        walk(JSON.parse(script.textContent || ""));
+      } catch (e) {
+
+      }
+    });
+
+    document.querySelectorAll("script[data-bootloader-hash], link[data-bootloader-hash]").forEach(function (element) {
+      var c = element.getAttribute("data-c");
+      resources.push({
+        type: element.tagName === "LINK" ? "css" : "js",
+        p: element.getAttribute("data-p"),
+        c: c === "1" ? 1 : c === "2" ? 2 : 0,
+      });
+    });
+
+    if (csrOn) {
+      resources.forEach(function (resource) {
+        if (!resource || resource.type === "async" || resource.type === "csr" || resource.p == null || !resource.c) return;
+        parseHasteResourceIndexes(resource.p).forEach(function (index) {
+          if (index !== 0) addHasteIndex("__csr", index);
+        });
+      });
+    }
+
+    var result = {};
+    var dyn = encodeHasteBitMap(dynIndexes);
+    if (dyn) result.__dyn = dyn;
+    Object.keys(hasteIndexes).forEach(function (name) {
+      var value = encodeHasteBitMap(hasteIndexes[name]);
+      if (value) result[name] = value;
+    });
+    return result;
+  }
+
+  function genWebSessionId() {
+    var rand6 = function () {
+      return Math.floor(Math.random() * Math.pow(2, 31))
+        .toString(36)
+        .padStart(6, "0");
+    };
+    return rand6() + ":" + rand6() + ":" + rand6();
+  }
+
+  function getGraphQLContext() {
+    if (!graphQLContextCache.ts || Date.now() - graphQLContextCache.ts > 60000 || !graphQLContextCache.siteData) {
+      graphQLContextCache = {
+        ts: Date.now(),
+        siteData: getSiteData(),
+        haste: getHasteBitMapParams(),
+      };
+    }
+    return graphQLContextCache;
+  }
+
+  function buildGraphQLData(docId, variables, friendlyName, crn, rootName) {
+    var context = getGraphQLContext();
+    var siteData = context.siteData || {};
+    var hasteData = context.haste || {};
+    var lsd = getLSD();
+    var dtsg = getDTSG();
+    var bloks = getBloks();
+    var body = Object.assign(
+      {
+        av: getCookie("ds_user_id") || "0",
+        fb_api_caller_class: "RelayModern",
+        fb_api_req_friendly_name: friendlyName,
+        server_timestamps: "true",
+        doc_id: docId,
+        lsd: lsd || "",
+        fb_dtsg: dtsg || "",
+        __hs: siteData.haste_session || "",
+        __hsi: siteData.hsi || "",
+        __rev: siteData.client_revision || "",
+        __spin_r: siteData.__spin_r || "",
+        __spin_b: siteData.__spin_b || "",
+        __spin_t: siteData.__spin_t || "",
+        __comet_req: siteData.comet_env || "",
+        __ccg: "EXCELLENT",
+        dpr: "3",
+        jazoest: getJazoest(dtsg),
+        __user: "0",
+        __a: "1",
+        __d: "www",
+        __req: "1",
+        __s: genWebSessionId(),
+        variables: JSON.stringify(variables),
+      },
+      hasteData
+    );
+    if (crn) body.__crn = crn;
+
+    var headers = {
+      Accept: "*/*",
+      Dpr: "3",
+      "Sec-Ch-Dpr": "3",
+      "Viewport-Width": "3840",
+      "Sec-Ch-Viewport-Width": "3840",
+      "X-IG-App-ID": getAppId(),
+      "X-CSRFToken": getCookie("csrftoken"),
+      "X-Fb-Friendly-Name": friendlyName,
+      "X-Fb-Lsd": lsd || "",
+      "X-Asbd-ID": "359341",
+    };
+    if (bloks) headers["X-Bloks-Version-ID"] = bloks;
+    if (rootName) headers["X-Root-Field-Name"] = rootName;
+
+    var formData = new FormData();
+    Object.keys(body).forEach(function (key) {
+      formData.append(key, body[key]);
+    });
+
+    return { url: new URL("/graphql/query", location.origin).href, body: formData, headers: headers };
+  }
+
+  function graphQLRequest(docId, variables, friendlyName, crn, rootName) {
+    var api = buildGraphQLData(docId, variables, friendlyName, crn, rootName);
+    return request(api.url, {
+      method: "POST",
+      data: api.body,
+      headers: api.headers,
+      retries: 0,
+      timeout: 15000,
+    });
   }
 
   function androidHeaders() {
@@ -902,42 +1275,236 @@
         hdUrl = obj.graphql.user.hd_profile_pic_url_info && obj.graphql.user.hd_profile_pic_url_info.url;
       }
       if (!user) throw new Error("No user data returned");
+      if (!user.username) user.username = username;
       if (!user.pk && user.id) user.pk = user.id;
       if (!user.id && user.pk) user.id = user.pk;
-      user._hdUrl = hdUrl || null;
+      user._hdUrl = hdUrl || user.profile_pic_url_hd || null;
       return { user: user };
     });
   }
 
+  function fetchWithTimeout(url, options, timeoutMs) {
+    if (typeof AbortController === "undefined") return fetch(url, options);
+    var controller = new AbortController();
+    var timer = setTimeout(function () {
+      controller.abort();
+    }, timeoutMs);
+    return fetch(url, Object.assign({}, options, { signal: controller.signal })).finally(function () {
+      clearTimeout(timer);
+    });
+  }
+
+  function getUserIdViaProfileHtml(username) {
+    var normalized = String(username || "").replace(/^@+/, "").trim().toLowerCase();
+    if (!normalized) return Promise.reject(new Error("No username provided"));
+    var profileUrl = new URL("/" + encodeURIComponent(normalized) + "/", "https://www.instagram.com").href;
+    return fetchWithTimeout(profileUrl, {
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "text/html" },
+    }, 10000)
+      .then(function (response) {
+        if (!response.ok) throw new Error("Profile HTML failed with HTTP " + response.status);
+        return response.text().then(function (html) {
+          var finalUrl = new URL(response.url || profileUrl);
+          var finalUsername = finalUrl.pathname.split("/").filter(Boolean)[0] || "";
+          if (!/(^|\.)instagram\.com$/i.test(finalUrl.hostname) || finalUsername.toLowerCase() !== normalized) {
+            throw new Error("Profile HTML redirected away from the requested profile");
+          }
+          var patterns = [/"profile_id"\s*:\s*"?(\d+)"?/, /"(?:logging_page_id|page_id)"\s*:\s*"profilePage_(\d+)"/, /"profilePage_(\d+)"/];
+          var id = null;
+          for (var i = 0; i < patterns.length; i++) {
+            var m = html.match(patterns[i]);
+            if (m) {
+              id = m[1];
+              break;
+            }
+          }
+          var doc = new DOMParser().parseFromString(html, "text/html");
+          if (!id) {
+            var metaId = doc.querySelector('meta[property="instapp:owner_user_id"]');
+            var content = metaId && metaId.getAttribute("content");
+            if (/^\d+$/.test(content || "")) id = content;
+          }
+          if (!id) throw new Error("Profile HTML did not contain a user ID");
+          var pic = doc.querySelector('meta[property="og:image"]');
+          return {
+            user: {
+              id: id,
+              pk: id,
+              username: normalized,
+              profile_pic_url: (pic && pic.getAttribute("content")) || null,
+              _hdUrl: (pic && pic.getAttribute("content")) || null,
+            },
+          };
+        });
+      });
+  }
+
+  function getUserIdFromPolarisSearch(username) {
+    var normalized = String(username || "").replace(/^@+/, "").trim().toLowerCase();
+    if (!normalized) return Promise.reject(new Error("No username provided"));
+    return graphQLRequest(
+      "27706427925724183",
+      {
+        data: {
+          context: "blended",
+          include_reel: "true",
+          query: normalized,
+          rank_token: "",
+          search_surface: "web_top_search",
+        },
+        hasQuery: true,
+      },
+      "PolarisSearchBoxRefetchableQuery",
+      "comet.igweb.PolarisExploreRoute",
+      "xdt_api__v1__fbsearch__topsearch_connection"
+    ).then(function (obj) {
+      var users = obj && obj.data && obj.data.xdt_api__v1__fbsearch__topsearch_connection &&
+        obj.data.xdt_api__v1__fbsearch__topsearch_connection.users;
+      if (!Array.isArray(users) || !users.length) throw new Error("Polaris search returned no users");
+      var result = users.find(function (item) {
+        return item.user && (item.user.username || "").toLowerCase() === normalized;
+      }) || users[0];
+      if (!result || !result.user) throw new Error("Polaris search result has no user");
+      var rawId = result.user.pk || result.user.id;
+      if (!rawId) throw new Error("Polaris search result has no user ID");
+      return {
+        user: Object.assign({}, result.user, {
+          id: String(rawId),
+          pk: String(rawId),
+          username: result.user.username || normalized,
+        }),
+      };
+    });
+  }
+
+  function resolveUserIdLive(username) {
+    return getUserIdViaProfileHtml(username).catch(function () {
+      return getUserIdFromPolarisSearch(username);
+    });
+  }
+
+  function getUserIdFromPersistentCache(username) {
+    var id = state.GL_userIdCache[String(username || "").toLowerCase()];
+    return id ? { user: { id: String(id), pk: String(id), username: username } } : null;
+  }
+
+  function putUserIdInCache(username, id) {
+    if (!username || id == null) return false;
+    var key = String(username).toLowerCase();
+    var keys = Object.keys(state.GL_userIdCache);
+    if (!state.GL_userIdCache[key] && keys.length >= USER_ID_MAX_CACHE_ITEMS) {
+      delete state.GL_userIdCache[keys[0]];
+    }
+    state.GL_userIdCache[key] = String(id);
+    setPersistentCache(USER_ID_CACHE_KEY, state.GL_userIdCache);
+    return true;
+  }
+
   function getUserId(username) {
-    var key = (username || "").toLowerCase();
+    var key = String(username || "").toLowerCase();
+    if (!key) return Promise.reject(new Error("No username provided"));
     if (userIdCache.has(key)) return userIdCache.get(key);
-    var p = getUserIdWithAgent(key)
+
+    var persisted = getUserIdFromPersistentCache(key);
+    if (persisted) {
+      userIdCache.set(key, Promise.resolve(persisted));
+      return userIdCache.get(key);
+    }
+
+    var p = resolveUserIdLive(key)
+      .catch(function () {
+        return getUserIdWithAgent(key);
+      })
       .catch(function () {
         return getUserIdViaSearch(key);
       })
-      .catch(function (err) {
+      .then(function (info) {
+        var id = info && info.user && (info.user.pk || info.user.id);
+        if (id) putUserIdInCache(key, id);
+        return info;
+      })
+      .catch(function () {
         userIdCache.delete(key);
-        throw new Error("Cannot resolve user ID for: " + username);
+        throw new Error("Cannot resolve user ID for: " + key);
       });
     userIdCache.set(key, p);
     return p;
   }
 
-  function getStories(userId) {
-    return request(
-      "https://www.instagram.com/graphql/query/?query_hash=15463e8449a83d3d60b06be7e90627c7&variables=" +
-        encodeURIComponent(JSON.stringify({ reel_ids: [String(userId)], precomposed_overlay: false })),
-      { retries: 1 }
-    );
+  function normalizeReelPayload(obj, isHighlight) {
+    if (!obj || !obj.data) return obj;
+    var data = obj.data;
+    var direct = data.xdt_api__v1__feed__reels_media;
+    if (direct && Array.isArray(direct.reels_media) && !data.reels_media) {
+      data.reels_media = direct.reels_media;
+    }
+    var connection = data.xdt_api__v1__feed__reels_media__connection;
+    if (connection && Array.isArray(connection.edges) && connection.edges.length) {
+      var nodes = connection.edges
+        .map(function (edge) {
+          return edge && edge.node;
+        })
+        .filter(Boolean);
+      if (nodes.length) {
+        if (isHighlight && nodes[0] && Array.isArray(nodes[0].items)) nodes[0].items.reverse();
+        data.reels_media = nodes;
+      }
+    }
+    return obj;
+  }
+
+  function getStories(userId, expectedUsername, _retried) {
+    return graphQLRequest(
+      "29170422829314651",
+      {
+        reel_ids_arr: [String(userId)],
+        __relay_internal__pv__PolarisCommunityNoteStoriesLabelEnabledrelayprovider: true,
+      },
+      "PolarisStoriesV3ReelPageStandaloneQuery",
+      "comet.igweb.PolarisProfilePostsTabRoute",
+      "xdt_api__v1__feed__reels_media"
+    )
+      .then(function (obj) {
+        normalizeReelPayload(obj, false);
+        var reel = obj && obj.data && obj.data.reels_media && obj.data.reels_media[0];
+        var owner = reel && (reel.owner || reel.user);
+        if (expectedUsername && owner && owner.username &&
+          owner.username.toLowerCase() !== expectedUsername.toLowerCase()) {
+          if (_retried) throw new Error("Story owner mismatch");
+          var key = expectedUsername.toLowerCase();
+          delete state.GL_userIdCache[key];
+          setPersistentCache(USER_ID_CACHE_KEY, state.GL_userIdCache);
+          userIdCache.delete(key);
+          return resolveUserIdLive(key).then(function (info) {
+            var fresh = info && info.user && (info.user.pk || info.user.id);
+            if (fresh && String(fresh) !== String(userId)) {
+              return getStories(String(fresh), expectedUsername, true);
+            }
+            throw new Error("Story owner mismatch");
+          });
+        }
+        return obj;
+      });
   }
 
   function getHighlightStories(highlightId) {
-    return request(
-      "https://www.instagram.com/graphql/query/?query_hash=45246d3fe16ccc6577e0bd297a5db1ab&variables=" +
-        encodeURIComponent(JSON.stringify({ highlight_reel_ids: [String(highlightId)], precomposed_overlay: false })),
-      { retries: 1 }
-    );
+    return graphQLRequest(
+      "29299425373007309",
+      {
+        initial_reel_id: "highlight:" + highlightId,
+        reel_ids: ["highlight:" + highlightId],
+        first: 999,
+        last: 0,
+        __relay_internal__pv__PolarisCommunityNoteStoriesLabelEnabledrelayprovider: true,
+      },
+      "PolarisStoriesV3HighlightsPageQuery",
+      "comet.igweb.PolarisProfilePostsTabRoute",
+      "xdt_api__v1__feed__reels_media__connection"
+    ).then(function (obj) {
+      return normalizeReelPayload(obj, true);
+    });
   }
 
   function getUserHighlights(userId) {
@@ -1005,77 +1572,66 @@
 
   function getPostPayload(shortcode) {
     var cached = state.GL_payloadCache[shortcode];
-    if (cached && Date.now() - cached.ts < 600000) {
+    if (cached && Date.now() - cached.ts < POST_CACHE_MAX_AGE) {
       return Promise.resolve(cached.value);
     }
     function cache(res) {
+      var keys = Object.keys(state.GL_payloadCache);
+      if (keys.length >= POST_CACHE_MAX_ITEMS && !state.GL_payloadCache[shortcode]) {
+        delete state.GL_payloadCache[keys[0]];
+      }
       state.GL_payloadCache[shortcode] = { ts: Date.now(), value: res };
       return res;
     }
     var page = extractPostFromPageJson(shortcode);
     if (page) return Promise.resolve(cache(page));
-    var pk = shortcodeToMediaId(shortcode);
-    return request(
-      "https://www.instagram.com/api/v1/media/" + encodeURIComponent(pk) + "/info/",
-      { headers: { "X-IG-App-ID": getAppId() }, retries: 0, timeout: 10000 }
-    ).then(function (obj) {
-      if (obj && obj.status === "ok" && obj.items && obj.items[0]) {
-        var item = obj.items[0];
-        if (item.user && !item.owner) item.owner = item.user;
-        return cache({ type: "query_id", resource: item });
-      }
-      var csrf = "";
-      try {
-        var m = document.cookie.match(/csrftoken=([^;]+)/);
-        if (m) csrf = m[1];
-      } catch (e) {
 
-      }
-      var vars = encodeURIComponent(
-        JSON.stringify({
-          shortcode: shortcode,
-          __relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider: false,
-        })
-      );
-      return request("https://www.instagram.com/graphql/query", {
-        method: "POST",
-        data: "variables=" + vars + "&doc_id=27128499623469141&server_timestamps=true",
-        headers: Object.assign(
-          { "X-FB-Friendly-Name": "PolarisPostRootQuery" },
-          csrf ? { "X-CSRFToken": csrf } : {}
-        ),
-        retries: 0,
-        timeout: 10000,
-      }).then(function (obj2) {
-        var items =
-          obj2 &&
-          obj2.data &&
-          obj2.data.xdt_api__v1__media__shortcode__web_info &&
-          obj2.data.xdt_api__v1__media__shortcode__web_info.items;
+    return graphQLRequest(
+      "39422285384081769",
+      {
+        shortcode: shortcode,
+        __relay_internal__pv__PolarisShortDramaEnabledrelayprovider: true,
+        __relay_internal__pv__PolarisThreadsStyleCommentsEnabledrelayprovider: false,
+        __relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider: true,
+      },
+      "PolarisPostRootQuery",
+      "comet.igweb.PolarisFeedRoute",
+      "xdt_api__v1__media__shortcode__web_info"
+    )
+      .then(function (obj) {
+        var items = obj && obj.data && obj.data.xdt_api__v1__media__shortcode__web_info &&
+          obj.data.xdt_api__v1__media__shortcode__web_info.items;
         if (items && items[0]) {
-          var item2 = items[0];
-          if (item2.user && !item2.owner) item2.owner = item2.user;
-          return cache({ type: "query_id", resource: item2 });
+          var item = items[0];
+          if (item.user && !item.owner) item.owner = item.user;
+          return cache({ type: "query_id", resource: item });
         }
-        var vars2 = encodeURIComponent(JSON.stringify({ shortcode: shortcode }));
-        return request(
-          "https://www.instagram.com/graphql/query/?query_hash=2c4c2e343a8f64c625ba02b2aa12c7f8&variables=" + vars2,
-          { headers: androidHeaders(), retries: 0, timeout: 10000 }
-        ).then(function (obj3) {
-          if (obj3 && obj3.data && obj3.data.shortcode_media) {
-            return cache({ type: "query_hash", resource: obj3.data.shortcode_media });
+        throw new Error("Post payload unavailable");
+      })
+      .catch(function () {
+        var pk = shortcodeToMediaId(shortcode);
+        return request("https://www.instagram.com/api/v1/media/" + encodeURIComponent(pk) + "/info/", {
+          headers: { "X-IG-App-ID": getAppId() },
+          retries: 0,
+          timeout: 10000,
+        }).then(function (obj) {
+          if (obj && obj.status === "ok" && obj.items && obj.items[0]) {
+            var item = obj.items[0];
+            if (item.user && !item.owner) item.owner = item.user;
+            return cache({ type: "query_id", resource: item });
           }
-          throw new Error("Post payload unavailable");
+          var vars = encodeURIComponent(JSON.stringify({ shortcode: shortcode }));
+          return request(
+            "https://www.instagram.com/graphql/query/?query_hash=2c4c2e343a8f64c625ba02b2aa12c7f8&variables=" + vars,
+            { headers: androidHeaders(), retries: 0, timeout: 10000 }
+          ).then(function (obj3) {
+            if (obj3 && obj3.data && obj3.data.shortcode_media) {
+              return cache({ type: "query_hash", resource: obj3.data.shortcode_media });
+            }
+            throw new Error("Post payload unavailable");
+          });
         });
       });
-    });
-  }
-
-  function getPostOwner(postPath) {
-    var shortcode = String(postPath || "").split("/").filter(Boolean).pop();
-    return getPostPayload(shortcode).then(function (res) {
-      return res.resource.owner && res.resource.owner.username ? res.resource.owner.username : null;
-    });
   }
 
   function getMediaInfo(mediaId) {
@@ -1126,17 +1682,45 @@
     });
   }
 
-  function getUserHdAvatar(userId) {
-    return request("https://www.instagram.com/api/v1/users/" + encodeURIComponent(String(userId)) + "/info/", {
-      headers: { "X-IG-App-ID": getAppId() },
-      retries: 0,
-      timeout: 12000,
-    }).then(function (obj) {
-      if (obj && obj.status === "ok" && obj.user && obj.user.hd_profile_pic_url_info && obj.user.hd_profile_pic_url_info.url) {
-        return obj.user.hd_profile_pic_url_info.url;
+  function getUserHdAvatar(userId, expectedUsername) {
+    return graphQLRequest(
+      "40158838120366999",
+      {
+        enable_integrity_filters: true,
+        id: String(userId),
+        __relay_internal__pv__PolarisCannesGuardianExperienceEnabledrelayprovider: true,
+        __relay_internal__pv__PolarisCASB976ProfileEnabledrelayprovider: false,
+        __relay_internal__pv__PolarisProfileInformTreatmentBannerEnabledrelayprovider: false,
+        __relay_internal__pv__PolarisWebSchoolsEnabledrelayprovider: false,
+        __relay_internal__pv__PolarisProfileRingsGradientEnabledrelayprovider: true,
+        __relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider: true,
+        __relay_internal__pv__PolarisShortDramaEnabledrelayprovider: true,
+      },
+      "PolarisProfilePageContentQuery",
+      "comet.igweb.PolarisExploreRoute",
+      null
+    ).then(function (obj) {
+      var user = obj && obj.data && obj.data.user;
+      if (expectedUsername && user && user.username &&
+        user.username.toLowerCase() !== expectedUsername.toLowerCase()) {
+        throw new Error("Avatar owner mismatch");
       }
+      var url = user && user.hd_profile_pic_url_info && user.hd_profile_pic_url_info.url;
+      if (url) return url;
+      if (user && user.profile_pic_url_hd) return user.profile_pic_url_hd;
       throw new Error("HD profile picture unavailable");
     });
+  }
+
+  function isReelsMediaVideo(item) {
+    if (!item) return false;
+    if (item.is_video === true) return true;
+    if (item.is_video === false) return false;
+    if (item.video_versions && item.video_versions.length) return true;
+    if (item.video_resources && item.video_resources.length) return true;
+    if (item.video_dash_manifest) return true;
+    if (item.media_type != null) return item.media_type !== 1;
+    return false;
   }
 
   function gmFetch(url, responseType) {
@@ -1302,6 +1886,17 @@
     var timestamp = normTs(metadata.timestamp);
     var index = metadata.index != null ? metadata.index : 0;
     var date = new Date(timestamp * 1000);
+    var filetype = metadata.filetype || "jpg";
+
+    if (USER_SETTING.MATCH_VIDEO_FILENAME_TO_THUMBNAIL && (filetype === "mp4" || filetype === "m4a") && metadata.thumbnailURL) {
+      try {
+        var thumbBase = new URL(metadata.thumbnailURL).pathname.split("/").pop().split(".").slice(0, -1).join(".");
+        if (thumbBase) return sanitizeFilename((metadata.username || "instagram") + "_" + thumbBase) + "." + filetype;
+      } catch (e) {
+
+      }
+    }
+
     var original_name = "";
     try {
       original_name = decodeURIComponent(
@@ -1338,7 +1933,7 @@
         (metadata.username || "instagram") + "_" + (original_name || "media") + "_" + (metadata.shortcode || "")
       );
     }
-    return filename + "." + (metadata.filetype || "jpg");
+    return filename + "." + filetype;
   }
 
   async function createSaveFileElement(downloadLink, object, metadata) {
@@ -1444,8 +2039,9 @@
   function buildExifPayload(metadata) {
     var dateBytes = enc(formatExifDate(metadata.timestamp) + "\0");
     var artistBytes = enc((metadata.username || "") + "\0");
+    var exifIndex = metadata.index != null && metadata.index > 0 ? metadata.index : 1;
     var keywordBytes = encUtf16le(
-      "https://www.instagram.com/p/" + (metadata.shortcode || "") + "/\0"
+      "https://www.instagram.com/p/" + (metadata.shortcode || "") + "/?img_index=" + exifIndex + "\0"
     );
     var xpCommentBytes = encUtf16le(
       "https://www.instagram.com/uid/" + (metadata.uid || "unknown") + "\0"
@@ -1729,9 +2325,8 @@
   }
 
   async function downloadDashStreams(videoUrl, audioUrl, meta) {
-    var vBuf = await fetchArrayBuffer(videoUrl);
-    var aBuf = await fetchArrayBuffer(audioUrl);
-    var mergedBuf = await muxDashVideoAudioToMp4(vBuf, aBuf);
+    var buffers = await Promise.all([fetchArrayBuffer(videoUrl), fetchArrayBuffer(audioUrl)]);
+    var mergedBuf = await muxDashVideoAudioToMp4(buffers[0], buffers[1]);
     var merged = new Blob([mergedBuf], { type: "video/mp4" });
     await createSaveFileElement(videoUrl, merged, meta);
   }
@@ -1739,20 +2334,32 @@
   async function tryDashDownload(mediaItem, meta, isPreview) {
     try {
       if (!USER_SETTING.PREFER_DASH_MANIFEST || !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA) return false;
-      if (!mediaItem || !mediaItem.video_dash_manifest || !mediaItem.video_versions) return false;
+      if (!mediaItem || !mediaItem.video_dash_manifest) return false;
       var best = parseDashManifest(mediaItem.video_dash_manifest);
       var vUrl = best && best.video ? best.video.url : "";
       if (!vUrl) return false;
       var aUrl = best && best.audio ? best.audio.url : "";
+      var progressiveUrl = mediaItem.video_versions && mediaItem.video_versions[0] && mediaItem.video_versions[0].url;
+      var thumbnailURL =
+        (mediaItem.image_versions2 && mediaItem.image_versions2.candidates && mediaItem.image_versions2.candidates[0] &&
+          mediaItem.image_versions2.candidates[0].url) ||
+        (mediaItem.display_resources && mediaItem.display_resources[0] && mediaItem.display_resources[0].src) ||
+        mediaItem.display_url ||
+        meta.thumbnailURL;
+      var dashMeta = Object.assign({}, meta, { thumbnailURL: thumbnailURL });
       if (isPreview) {
-        openNewTab(vUrl);
+        if (USER_SETTING.NEW_TAB_HIGHEST_VIDEO) {
+          openNewTab(vUrl);
+        } else {
+          openNewTab(progressiveUrl || vUrl);
+        }
         return true;
       }
       if (!aUrl) {
-        await saveFiles(vUrl, meta);
+        await saveFiles(vUrl, Object.assign({}, dashMeta, { filetype: "mp4" }));
         return true;
       }
-      await downloadDashStreams(vUrl, aUrl, meta);
+      await downloadDashStreams(vUrl, aUrl, dashMeta);
       return true;
     } catch (e) {
       logger("[DASH]", "mux failed, using single-file fallback:", e && e.message ? e.message : e);
@@ -1763,8 +2370,8 @@
   async function downloadResource(item, meta, opts) {
     opts = opts || {};
     var dashCandidate = item.dash || state.GL_mediaDataCache[item.id] || null;
-    if (dashCandidate && !opts.preview) {
-      var okDash = await tryDashDownload(dashCandidate, meta, false);
+    if (dashCandidate && (!opts.preview || USER_SETTING.NEW_TAB_HIGHEST_VIDEO)) {
+      var okDash = await tryDashDownload(dashCandidate, meta, !!opts.preview);
       if (okDash) return true;
     }
     if (!opts.preview && !item.isVideo && item.id && USER_SETTING.CAPTURE_IMAGE_VIA_MEDIA_CACHE) {
@@ -1797,6 +2404,7 @@
       caption: item.caption || meta.caption,
       index: meta.index != null ? meta.index : 0,
       filetype: item.ext || meta.filetype || (item.isVideo ? "mp4" : "jpg"),
+      thumbnailURL: item.thumb || meta.thumbnailURL,
     });
     return await saveFiles(item.url, finalMeta);
   }
@@ -1808,7 +2416,14 @@
     Progress.set(0, total);
     for (var i = 0; i < total; i++) {
       try {
-        await downloadResource(items[i], Object.assign({}, meta, { index: i + 1 }), {});
+        var itemMeta = Object.assign({}, meta, { index: items[i]._igSourceIndex || i + 1 });
+        if (items[i].takenAt && USER_SETTING.RENAME_PUBLISH_DATE) {
+          itemMeta.timestamp = items[i].takenAt;
+        }
+        if ((meta.sourceType === "stories" || meta.sourceType === "highlights") && items[i].id) {
+          itemMeta.shortcode = items[i].id;
+        }
+        await downloadResource(items[i], itemMeta, {});
       } catch (e) {
         logger("batch item failed:", e && e.message ? e.message : e);
       }
@@ -1825,164 +2440,250 @@
 
   const INTERNAL_CSS = `
 :root{
-  --ig-brand:#e1306c;
-  --ig-brand-2:#f77737;
-  --ig-accent:#0095f6;
+  --ig-brand:#f43f5e;
+  --ig-brand-2:#fb923c;
+  --ig-accent:#f97316;
+  --ig-accent-soft:rgba(249,115,22,.12);
   --ig-surface:#ffffff;
-  --ig-surface-2:#f7f7f9;
-  --ig-text:#1c1c1e;
-  --ig-text-2:#6e6e73;
-  --ig-line:rgba(0,0,0,.08);
-  --ig-shadow:0 12px 40px rgba(0,0,0,.22);
-  --ig-radius:14px;
+  --ig-surface-2:#f6f6f8;
+  --ig-surface-3:#ececf1;
+  --ig-text:#17171a;
+  --ig-text-2:#71717a;
+  --ig-line:rgba(24,24,27,.09);
+  --ig-line-strong:rgba(24,24,27,.16);
+  --ig-shadow:0 24px 60px -20px rgba(24,24,27,.35),0 2px 8px rgba(24,24,27,.06);
+  --ig-shadow-sm:0 8px 24px -12px rgba(24,24,27,.3);
+  --ig-radius:18px;
+  --ig-radius-sm:12px;
+  --ig-overlay:rgba(16,16,20,.55);
+  --ig-ring:0 0 0 3px rgba(249,115,22,.28);
+  --ig-font:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  --ig-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
 @media (prefers-color-scheme:dark){
   :root{
-    --ig-surface:#1c1c1e;
-    --ig-surface-2:#26262a;
-    --ig-text:#f5f5f7;
-    --ig-text-2:#a1a1a6;
-    --ig-line:rgba(255,255,255,.1);
-    --ig-shadow:0 12px 40px rgba(0,0,0,.55);
+    --ig-surface:#17171b;
+    --ig-surface-2:#1f1f25;
+    --ig-surface-3:#2a2a32;
+    --ig-text:#f4f4f5;
+    --ig-text-2:#a1a1aa;
+    --ig-line:rgba(255,255,255,.08);
+    --ig-line-strong:rgba(255,255,255,.16);
+    --ig-shadow:0 24px 60px -20px rgba(0,0,0,.8),0 2px 8px rgba(0,0,0,.35);
+    --ig-shadow-sm:0 8px 24px -12px rgba(0,0,0,.7);
+    --ig-overlay:rgba(0,0,0,.68);
+    --ig-accent-soft:rgba(249,115,22,.16);
   }
 }
-.ignis-toasts{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:2147483000;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none;max-width:min(92vw,480px)}
-.ignis-toast{pointer-events:auto;background:rgba(255,255,255,.85);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:var(--ig-text);border:1px solid rgba(255,255,255,.45);border-radius:12px;padding:10px 18px;font:500 13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.18);opacity:0;transform:translateY(-10px) scale(.97);transition:opacity .22s ease,transform .22s ease;cursor:pointer;max-width:100%}
-@media (prefers-color-scheme:dark){.ignis-toast{background:rgba(22,22,26,.85);border-color:rgba(255,255,255,.14)}}
+.ignis-toasts{position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:2147483000;display:flex;flex-direction:column;gap:10px;align-items:center;pointer-events:none;max-width:min(92vw,520px)}
+.ignis-toast{pointer-events:auto;display:flex;align-items:center;gap:10px;background:var(--ig-surface);color:var(--ig-text);border:1px solid var(--ig-line);border-radius:14px;padding:12px 18px;font:500 13px/1.45 var(--ig-font);box-shadow:var(--ig-shadow-sm);opacity:0;transform:translateY(-12px) scale(.97);transition:opacity .22s ease,transform .22s ease;cursor:pointer;max-width:100%}
+.ignis-toast::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ig-accent);flex-shrink:0}
 .ignis-toast-in{opacity:1;transform:none}
 .ignis-toast-out{opacity:0;transform:translateY(-8px)}
-.ignis-toast-success{border-left:3px solid #34c759}
-.ignis-toast-error{border-left:3px solid #ff3b30}
-.ignis-toast-info{border-left:3px solid var(--ig-accent)}
-.ignis-progress{position:fixed;bottom:22px;right:22px;z-index:2147483000;display:none;align-items:center;gap:10px;background:rgba(255,255,255,.85);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:var(--ig-text);border:1px solid rgba(255,255,255,.45);border-radius:12px;padding:10px 16px;font:600 12px -apple-system,"Segoe UI",sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.18)}
-@media (prefers-color-scheme:dark){.ignis-progress{background:rgba(22,22,26,.85);border-color:rgba(255,255,255,.14)}}
+.ignis-toast-success::before{background:#22c55e}
+.ignis-toast-error::before{background:#ef4444}
+.ignis-toast-info::before{background:var(--ig-accent)}
+
+.ignis-progress{position:fixed;bottom:24px;right:24px;z-index:2147483000;display:none;align-items:center;gap:12px;background:var(--ig-surface);color:var(--ig-text);border:1px solid var(--ig-line);border-radius:14px;padding:12px 18px;font:600 12px var(--ig-font);box-shadow:var(--ig-shadow-sm)}
 .ignis-progress-on{display:flex}
 .ignis-progress i{width:16px;height:16px;border-radius:50%;border:2px solid var(--ig-brand);border-top-color:transparent;animation:ignisSpin .7s linear infinite}
 @keyframes ignisSpin{to{transform:rotate(360deg)}}
-.ignis-modal{position:fixed;inset:0;z-index:2147482000;display:flex;align-items:center;justify-content:center;background:transparent;opacity:0;transition:opacity .2s ease}
-.ignis-modal-in{opacity:1}
-.ignis-modal-card{position:relative;width:min(720px,94vw);max-height:86vh;display:flex;flex-direction:column;background:rgba(255,255,255,.78);backdrop-filter:blur(20px) saturate(150%);-webkit-backdrop-filter:blur(20px) saturate(150%);color:var(--ig-text);border:1px solid rgba(255,255,255,.45);border-radius:16px;box-shadow:0 18px 50px rgba(0,0,0,.25);overflow:hidden;transform:translateY(10px) scale(.985);transition:transform .18s ease;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-@media (prefers-color-scheme:dark){.ignis-modal-card{background:rgba(22,22,26,.72);border-color:rgba(255,255,255,.14)}}
+
+.ignis-modal{position:fixed;inset:0;z-index:2147482000;display:flex;align-items:center;justify-content:center;background:transparent;opacity:0;transition:opacity .2s ease;padding:24px}
+.ignis-modal-in{opacity:1;background:var(--ig-overlay);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+.ignis-modal-card{position:relative;width:min(760px,100%);max-height:88vh;display:flex;flex-direction:column;background:var(--ig-surface);color:var(--ig-text);border:1px solid var(--ig-line);border-radius:var(--ig-radius);box-shadow:var(--ig-shadow);overflow:hidden;transform:translateY(14px) scale(.985);transition:transform .2s cubic-bezier(.2,.8,.2,1);font-family:var(--ig-font)}
 .ignis-modal-in .ignis-modal-card{transform:none}
-.ignis-modal-head{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--ig-line);flex-shrink:0}
-.ignis-modal-title{font-size:15px;font-weight:700;letter-spacing:.2px;display:flex;align-items:center;gap:8px;min-width:0;flex:1}
-.ignis-modal-title .ignis-sub{font-size:11px;font-weight:500;color:var(--ig-text-2);background:var(--ig-surface-2);padding:2px 8px;border-radius:20px;white-space:nowrap}
-.ignis-modal-x{width:32px;height:32px;border:none;background:transparent;color:var(--ig-text-2);border-radius:50%;display:grid;place-items:center;cursor:pointer;transition:background .15s,color .15s;flex-shrink:0}
+.ignis-modal-wide .ignis-modal-card{width:min(980px,100%)}
+.ignis-modal-head{display:flex;align-items:center;gap:12px;padding:18px 22px;border-bottom:1px solid var(--ig-line);flex-shrink:0}
+.ignis-modal-title{font-size:16px;font-weight:700;letter-spacing:-.01em;display:flex;align-items:center;gap:10px;min-width:0;flex:1}
+.ignis-modal-title .ignis-sub{font:600 11px var(--ig-font);color:var(--ig-text-2);background:var(--ig-surface-2);border:1px solid var(--ig-line);padding:3px 9px;border-radius:999px;white-space:nowrap;letter-spacing:0}
+.ignis-modal-x{width:34px;height:34px;border:none;background:transparent;color:var(--ig-text-2);border-radius:10px;display:grid;place-items:center;cursor:pointer;transition:background .15s,color .15s;flex-shrink:0}
 .ignis-modal-x:hover{background:var(--ig-surface-2);color:var(--ig-text)}
-.ignis-modal-body{flex:1;overflow-y:auto;padding:12px;scrollbar-width:thin;scrollbar-color:var(--ig-line) transparent}
-.ignis-modal-body::-webkit-scrollbar{width:8px}
-.ignis-modal-body::-webkit-scrollbar-thumb{background:var(--ig-line);border-radius:4px}
-.ignis-modal-foot{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid var(--ig-line);flex-shrink:0;flex-wrap:nowrap;justify-content:flex-end}
+.ignis-modal-body{flex:1;overflow-y:auto;padding:16px;scrollbar-width:thin;scrollbar-color:var(--ig-line-strong) transparent}
+.ignis-modal-body::-webkit-scrollbar{width:10px}
+.ignis-modal-body::-webkit-scrollbar-thumb{background:var(--ig-line-strong);border-radius:99px;border:3px solid var(--ig-surface)}
+.ignis-modal-foot{display:flex;align-items:center;gap:10px;padding:14px 18px;border-top:1px solid var(--ig-line);flex-shrink:0;flex-wrap:nowrap;justify-content:flex-end;background:var(--ig-surface)}
 .ignis-foot-gap{flex:1}
-.ignis-sel{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;font:600 12px -apple-system,"Segoe UI",sans-serif;color:var(--ig-text);white-space:nowrap}
+
+.ignis-btn{border:none;border-radius:11px;padding:10px 18px;font:600 13px var(--ig-font);cursor:pointer;transition:transform .1s,filter .15s,background .15s;display:inline-flex;align-items:center;gap:8px;min-height:40px}
+.ignis-btn:active{transform:scale(.98)}
+.ignis-btn:focus-visible{outline:none;box-shadow:var(--ig-ring)}
+.ignis-btn:disabled{opacity:.4;cursor:not-allowed}
+.ignis-btn-pri{background:linear-gradient(135deg,var(--ig-brand),var(--ig-brand-2));color:#fff;box-shadow:0 8px 18px -8px rgba(244,63,94,.65)}
+.ignis-btn-pri:not(:disabled):hover{filter:brightness(1.06)}
+.ignis-btn-sec{background:var(--ig-surface-2);color:var(--ig-text);border:1px solid var(--ig-line)}
+.ignis-btn-sec:not(:disabled):hover{background:var(--ig-surface-3)}
+.ignis-btn svg{width:15px;height:15px}
+.ignis-btn-sec svg{width:14px;height:14px}
+
+.ignis-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+@media (max-width:520px){.ignis-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}}
+.ignis-item{position:relative;display:flex;flex-direction:column;border:1px solid var(--ig-line);border-radius:16px;overflow:hidden;background:var(--ig-surface);transition:border-color .15s,transform .15s,box-shadow .15s}
+.ignis-item:hover{border-color:var(--ig-line-strong);transform:translateY(-2px);box-shadow:var(--ig-shadow-sm)}
+.ignis-item.is-selected{border-color:var(--ig-accent);box-shadow:0 0 0 1px var(--ig-accent)}
+.ignis-card-media{position:relative;aspect-ratio:4/5;background:var(--ig-surface-2);overflow:hidden}
+.ignis-thumb{width:100%;height:100%;object-fit:cover;display:block}
+.ignis-thumb-empty{width:100%;height:100%;display:grid;place-items:center;color:var(--ig-text-2);background:repeating-linear-gradient(135deg,var(--ig-surface-2),var(--ig-surface-2) 10px,var(--ig-surface-3) 10px,var(--ig-surface-3) 20px)}
+.ignis-badge{position:absolute;top:10px;right:10px;font:700 9px var(--ig-font);letter-spacing:.08em;padding:4px 8px;border-radius:999px;background:rgba(12,12,16,.7);color:#fff;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.ignis-checkmark{position:absolute;top:10px;left:10px;width:22px;height:22px;border-radius:7px;border:2px solid rgba(255,255,255,.9);background:rgba(12,12,16,.35);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:grid;place-items:center;transition:background .15s,border-color .15s}
+.ignis-checkmark::after{content:"";width:10px;height:6px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) scale(0);transition:transform .12s;margin-top:-2px}
+.ignis-checkmark:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.ignis-item.is-selected .ignis-checkmark{background:var(--ig-accent);border-color:var(--ig-accent)}
+.ignis-item.is-selected .ignis-checkmark::after{transform:rotate(-45deg) scale(1)}
+.ignis-card-body{padding:10px 12px 4px}
+.ignis-type{font:600 10px var(--ig-font);color:var(--ig-text-2);letter-spacing:.06em;text-transform:uppercase;display:flex;gap:6px;align-items:center}
+.ignis-type b{color:var(--ig-text);font-size:10px}
+.ignis-cap{font:400 11px/1.45 var(--ig-font);color:var(--ig-text-2);margin-top:4px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
+.ignis-actions{display:flex;gap:4px;padding:6px 8px 10px;margin-top:auto}
+.ignis-act{width:32px;height:32px;border:none;border-radius:9px;background:var(--ig-surface-2);color:var(--ig-text-2);display:grid;place-items:center;cursor:pointer;transition:all .12s}
+.ignis-act:hover{background:var(--ig-accent);color:#fff}
+.ignis-act svg{width:15px;height:15px}
+.ignis-item input[type="checkbox"]{position:absolute;opacity:0;pointer-events:none}
+
+.ignis-sel{display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none;font:600 12px var(--ig-font);color:var(--ig-text);white-space:nowrap}
 .ignis-sel input{position:absolute;opacity:0;width:0;height:0}
-.ignis-sel span{width:18px;height:18px;border:1.5px solid var(--ig-line);border-radius:5px;display:grid;place-items:center;transition:all .15s;background:rgba(255,255,255,.5);flex-shrink:0}
+.ignis-sel span{width:18px;height:18px;border:1.5px solid var(--ig-line-strong);border-radius:6px;display:grid;place-items:center;transition:all .15s;background:var(--ig-surface);flex-shrink:0}
 .ignis-sel span::after{content:"";width:9px;height:5px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) scale(0);transition:transform .12s;margin-top:-1px}
 .ignis-sel input:checked~span{background:var(--ig-accent);border-color:var(--ig-accent)}
 .ignis-sel input:checked~span::after{transform:rotate(-45deg) scale(1)}
 .ignis-sel input:indeterminate~span{background:var(--ig-accent);border-color:var(--ig-accent)}
 .ignis-sel input:indeterminate~span::after{transform:none;border:none;width:8px;height:2px;background:#fff;margin:0}
-.ignis-count{font:700 10px ui-monospace,Menlo,monospace;background:var(--ig-surface-2);border:1px solid var(--ig-line);border-radius:20px;padding:1px 7px;color:var(--ig-text-2)}
-.ignis-btn{border:none;border-radius:10px;padding:9px 18px;font:600 13px -apple-system,"Segoe UI",sans-serif;cursor:pointer;transition:transform .1s,filter .15s;display:inline-flex;align-items:center;gap:6px}
-.ignis-btn:active{transform:scale(.97)}
-.ignis-btn:disabled{opacity:.45;cursor:not-allowed}
-.ignis-btn-pri{background:linear-gradient(135deg,var(--ig-brand),var(--ig-brand-2));color:#fff}
-.ignis-btn-pri:not(:disabled):hover{filter:brightness(1.08)}
-.ignis-btn-sec{background:var(--ig-surface-2);color:var(--ig-text)}
-.ignis-btn-sec:not(:disabled):hover{filter:brightness(.97)}
-.ignis-check{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;margin:0}
-.ignis-check input{position:absolute;opacity:0;width:0;height:0}
-.ignis-check span{width:20px;height:20px;border:2px solid var(--ig-line);border-radius:6px;display:grid;place-items:center;transition:all .15s;flex-shrink:0;background:var(--ig-surface)}
-.ignis-check span::after{content:"";width:10px;height:6px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) scale(0);transition:transform .12s;margin-top:-2px}
-.ignis-check input:checked~span{background:var(--ig-accent);border-color:var(--ig-accent)}
-.ignis-check input:checked~span::after{transform:rotate(-45deg) scale(1)}
-.ignis-check input:indeterminate~span{background:var(--ig-accent);border-color:var(--ig-accent)}
-.ignis-check input:indeterminate~span::after{transform:none;border:none;width:10px;height:2px;background:#fff;margin:0}
-.ignis-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:12px;transition:background .12s;border:1px solid transparent}
-.ignis-item:hover{background:var(--ig-surface-2)}
-.ignis-thumb{width:56px;height:56px;border-radius:10px;object-fit:cover;background:var(--ig-surface-2);border:1px solid var(--ig-line);flex-shrink:0}
-.ignis-meta{flex:1;min-width:0}
-.ignis-type{font:600 11px -apple-system,"Segoe UI",sans-serif;color:var(--ig-text-2);letter-spacing:.4px;display:flex;gap:6px;align-items:center}
-.ignis-type b{color:var(--ig-text);font-size:12px}
-.ignis-cap{font:400 12px/1.4 -apple-system,"Segoe UI",sans-serif;color:var(--ig-text-2);margin-top:3px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:pre-wrap;word-break:break-word}
-.ignis-actions{display:flex;gap:6px;flex-shrink:0}
-.ignis-act{width:32px;height:32px;border:none;border-radius:9px;background:var(--ig-surface-2);color:var(--ig-text);display:grid;place-items:center;cursor:pointer;transition:all .12s}
-.ignis-act:hover{background:var(--ig-accent);color:#fff;transform:scale(1.05)}
-.ignis-act svg{width:15px;height:15px}
-.ignis-empty{padding:40px 20px;text-align:center;color:var(--ig-text-2);font:500 13px -apple-system,"Segoe UI",sans-serif}
-.ignis-load{display:flex;align-items:center;justify-content:center;gap:10px;padding:48px 0;color:var(--ig-text-2);font:500 13px -apple-system,"Segoe UI",sans-serif}
+.ignis-count{font:700 10px var(--ig-mono);background:var(--ig-surface-2);border:1px solid var(--ig-line);border-radius:999px;padding:2px 8px;color:var(--ig-text-2)}
+.ignis-empty{padding:48px 20px;text-align:center;color:var(--ig-text-2);font:500 13px var(--ig-font)}
+.ignis-load{display:flex;align-items:center;justify-content:center;gap:12px;padding:56px 0;color:var(--ig-text-2);font:500 13px var(--ig-font)}
 .ignis-load i{width:18px;height:18px;border-radius:50%;border:2px solid var(--ig-line);border-top-color:var(--ig-accent);animation:ignisSpin .7s linear infinite}
-.ignis-hint{font-size:11px;color:var(--ig-text-2);margin-left:auto}
+.ignis-hint{font-size:11px;color:var(--ig-text-2)}
 
-.ignis-tabs{display:flex;gap:4px;padding:10px 18px 0;overflow-x:auto;flex-shrink:0;scrollbar-width:none;border-bottom:1px solid var(--ig-line)}
+.ignis-tabs{display:flex;gap:4px;padding:4px;background:var(--ig-surface-2);border:1px solid var(--ig-line);border-radius:12px;margin:0 0 12px;overflow-x:auto;flex-shrink:0;scrollbar-width:none}
 .ignis-tabs::-webkit-scrollbar{display:none}
-.ignis-tab{border:none;background:transparent;color:var(--ig-text-2);font:600 12px -apple-system,"Segoe UI",sans-serif;padding:8px 12px;border-radius:10px 10px 0 0;cursor:pointer;white-space:nowrap;border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .15s}
-.ignis-tab:hover{color:var(--ig-text);background:var(--ig-surface-2)}
-.ignis-tab-a{color:var(--ig-accent)!important;border-bottom-color:var(--ig-accent)}
-.ignis-tab b{font-size:9px;background:var(--ig-accent);color:#fff;border-radius:20px;padding:1px 6px;margin-left:4px}
-.ignis-search{margin:12px 18px 0;padding:8px 12px;border:1px solid var(--ig-line);border-radius:10px;background:var(--ig-surface-2);color:var(--ig-text);font:500 13px -apple-system,"Segoe UI",sans-serif;outline:none;width:calc(100% - 36px);box-sizing:border-box}
-.ignis-search:focus{border-color:var(--ig-accent)}
-.ignis-row{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:12px;transition:background .1s}
+.ignis-tab{border:none;background:transparent;color:var(--ig-text-2);font:600 12px var(--ig-font);padding:8px 14px;border-radius:9px;cursor:pointer;white-space:nowrap;transition:all .15s}
+.ignis-tab:hover{color:var(--ig-text)}
+.ignis-tab-a{color:var(--ig-text)!important;background:var(--ig-surface);box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.ignis-tab b{font-size:9px;background:var(--ig-accent);color:#fff;border-radius:999px;padding:1px 6px;margin-left:6px;vertical-align:1px}
+.ignis-search{margin:0 0 12px;padding:10px 14px;border:1px solid var(--ig-line);border-radius:11px;background:var(--ig-surface-2);color:var(--ig-text);font:500 13px var(--ig-font);outline:none;width:100%;box-sizing:border-box}
+.ignis-search:focus{border-color:var(--ig-accent);box-shadow:var(--ig-ring)}
+.ignis-search::placeholder{color:var(--ig-text-2)}
+
+.ignis-row{display:flex;align-items:center;gap:14px;padding:12px 14px;border-radius:12px;transition:background .1s;border:1px solid transparent}
 .ignis-row:hover{background:var(--ig-surface-2)}
 .ignis-row-txt{flex:1;min-width:0}
-.ignis-row-lb{font:600 13px -apple-system,"Segoe UI",sans-serif;color:var(--ig-text)}
-.ignis-row-ds{font:400 11px/1.4 -apple-system,"Segoe UI",sans-serif;color:var(--ig-text-2);margin-top:2px}
+.ignis-row-lb{font:600 13px var(--ig-font);color:var(--ig-text);letter-spacing:-.01em}
+.ignis-row-ds{font:400 11px/1.5 var(--ig-font);color:var(--ig-text-2);margin-top:2px}
 .ignis-row-dis .ignis-row-lb,.ignis-row-dis .ignis-row-ds{opacity:.45}
 .ignis-sw{position:relative;width:42px;height:24px;flex-shrink:0;cursor:pointer}
 .ignis-sw input{position:absolute;opacity:0;width:0;height:0}
-.ignis-sw i{position:absolute;inset:0;background:var(--ig-line);border-radius:12px;transition:background .22s}
+.ignis-sw i{position:absolute;inset:0;background:var(--ig-surface-3);border-radius:999px;transition:background .22s}
 .ignis-sw i::before{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;background:#fff;border-radius:50%;box-shadow:0 1px 4px rgba(0,0,0,.25);transition:left .22s}
 .ignis-sw input:checked~i{background:var(--ig-accent)}
 .ignis-sw input:checked~i::before{left:20px}
+.ignis-sw input:focus-visible~i{box-shadow:var(--ig-ring)}
 .ignis-sw input:disabled~i{opacity:.5;cursor:not-allowed}
 .ignis-row-edit{position:absolute;inset:0;z-index:5;display:flex;align-items:center;gap:8px;background:var(--ig-surface);border:1px solid var(--ig-accent);border-radius:12px;padding:0 12px;box-shadow:var(--ig-shadow)}
 .ignis-row-wrap{position:relative}
-.ignis-inp{flex:1;min-width:60px;padding:6px 10px;border:1px solid var(--ig-line);border-radius:8px;background:var(--ig-surface-2);color:var(--ig-text);font:500 12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;outline:none}
-.ignis-inp:focus{border-color:var(--ig-accent)}
-.ignis-kbd{display:inline-flex;align-items:center;gap:4px;font:600 11px ui-monospace,Menlo,Consolas,monospace;color:var(--ig-text-2)}
-.ignis-kbd kbd{background:var(--ig-surface-2);border:1px solid var(--ig-line);border-bottom-width:2px;border-radius:6px;padding:2px 7px;font:600 11px ui-monospace,Menlo,Consolas,monospace}
-.ignis-keyrow{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:10px;cursor:pointer;transition:background .1s}
+.ignis-inp{flex:1;min-width:60px;padding:8px 12px;border:1px solid var(--ig-line);border-radius:9px;background:var(--ig-surface-2);color:var(--ig-text);font:500 12px var(--ig-mono);outline:none}
+.ignis-inp:focus{border-color:var(--ig-accent);box-shadow:var(--ig-ring)}
+
+.ignis-kbd{display:inline-flex;align-items:center;gap:4px;font:600 11px var(--ig-mono);color:var(--ig-text-2)}
+.ignis-kbd kbd{background:var(--ig-surface-2);border:1px solid var(--ig-line);border-bottom-width:2px;border-radius:6px;padding:2px 7px;font:600 11px var(--ig-mono)}
+.ignis-keyrow{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;cursor:pointer;transition:background .1s}
 .ignis-keyrow:hover{background:var(--ig-surface-2)}
 .ignis-keyrow .ignis-kbd{flex:1}
-.ignis-keyrow button{border:1px dashed var(--ig-line);background:var(--ig-surface-2);color:var(--ig-text);border-radius:8px;padding:5px 12px;font:600 12px ui-monospace,Menlo,monospace;cursor:pointer}
+.ignis-keyrow button{border:1px dashed var(--ig-line-strong);background:transparent;color:var(--ig-text-2);border-radius:8px;padding:6px 12px;font:600 11px var(--ig-mono);cursor:pointer;transition:all .15s}
 .ignis-keyrow button:hover{border-color:var(--ig-accent);color:var(--ig-accent)}
-.ignis-about{padding:8px 4px;line-height:1.7;font-size:13px;color:var(--ig-text)}
+
+.ignis-about{padding:8px 4px;line-height:1.75;font-size:13px;color:var(--ig-text)}
 .ignis-about b{color:var(--ig-brand)}
 .ignis-about a{color:var(--ig-accent);text-decoration:none;font-weight:600}
-.ignis-about .ignis-rt{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
-.ignis-about .ignis-rt span{background:var(--ig-surface-2);border:1px solid var(--ig-line);border-radius:20px;padding:3px 10px;font:600 11px -apple-system,"Segoe UI",sans-serif;color:var(--ig-text-2)}
-.ignis-stats-h{font:700 11px -apple-system,"Segoe UI",sans-serif;color:var(--ig-text-2);letter-spacing:.6px;text-transform:uppercase;padding:12px 12px 2px}
-.ignis-stat-v{font:600 12px ui-monospace,Menlo,Consolas,monospace;color:var(--ig-text);flex-shrink:0}
-.ignis-palette{position:fixed;inset:0;z-index:2147482600;background:rgba(0,0,0,.55);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:flex-start;justify-content:center;padding-top:14vh}
-.ignis-pal-card{width:min(520px,92vw);background:var(--ig-surface);color:var(--ig-text);border-radius:14px;border:1px solid var(--ig-line);box-shadow:var(--ig-shadow);overflow:hidden}
-.ignis-pal-inp{width:100%;box-sizing:border-box;border:none;outline:none;background:transparent;color:var(--ig-text);padding:15px 18px;font:500 14px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;border-bottom:1px solid var(--ig-line)}
-.ignis-pal-list{max-height:46vh;overflow-y:auto;padding:6px;scrollbar-width:thin}
-.ignis-pal-it{padding:9px 12px;border-radius:9px;font:500 13px -apple-system,"Segoe UI",sans-serif;cursor:pointer}
-.ignis-pal-on{background:var(--ig-surface-2);color:var(--ig-accent)}
+.ignis-about a:hover{text-decoration:underline}
+.ignis-rt{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0}
+.ignis-rt span{background:var(--ig-surface-2);border:1px solid var(--ig-line);border-radius:999px;padding:4px 11px;font:600 10px var(--ig-font);color:var(--ig-text-2);letter-spacing:.03em;text-transform:uppercase}
+.ignis-hero{display:flex;align-items:center;gap:14px;padding:8px 4px 18px;border-bottom:1px solid var(--ig-line);margin-bottom:8px}
+.ignis-hero-mark{width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,var(--ig-brand),var(--ig-brand-2));display:grid;place-items:center;color:#fff;font:800 18px var(--ig-font);box-shadow:0 10px 24px -10px rgba(244,63,94,.7)}
+.ignis-hero-mark svg{width:22px;height:22px}
+.ignis-hero h3{margin:0;font-size:17px;letter-spacing:-.02em}
+.ignis-hero p{margin:2px 0 0;font-size:12px;color:var(--ig-text-2)}
 
-.ignis-bar{position:absolute;top:12px;right:12px;z-index:15;display:flex;flex-direction:row-reverse;gap:6px;padding:6px;border-radius:12px;background:rgba(20,20,24,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.12);box-shadow:0 2px 14px rgba(0,0,0,.25)}
-.ignis-dl,.ignis-nt,.ignis-th,.ignis-da{width:34px;height:34px;border:none;border-radius:9px;background:transparent;color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s}
-.ignis-dl:hover,.ignis-nt:hover,.ignis-th:hover,.ignis-da:hover{background:rgba(255,255,255,.18);transform:scale(1.06)}
+.ignis-stat-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.ignis-stat-card{background:var(--ig-surface-2);border:1px solid var(--ig-line);border-radius:14px;padding:14px}
+.ignis-stat-card .ignis-stat-v{font:700 22px/1.1 var(--ig-font);letter-spacing:-.03em;display:block;margin-top:6px}
+.ignis-stat-card small{display:block;font:600 10px var(--ig-font);color:var(--ig-text-2);letter-spacing:.06em;text-transform:uppercase}
+.ignis-stats-h{font:700 10px var(--ig-font);color:var(--ig-text-2);letter-spacing:.08em;text-transform:uppercase;padding:16px 4px 6px}
+.ignis-row .ignis-stat-v{font:600 12px var(--ig-mono);color:var(--ig-text);flex-shrink:0}
+.ignis-spark{display:flex;align-items:flex-end;gap:4px;height:72px;padding:8px 4px;border-bottom:1px solid var(--ig-line);margin-bottom:6px}
+.ignis-spark-bar{flex:1;min-width:4px;background:linear-gradient(180deg,var(--ig-brand),var(--ig-brand-2));border-radius:3px 3px 0 0;opacity:.85;transition:opacity .15s}
+.ignis-spark-bar:hover{opacity:1}
+
+.ignis-tagged-list{display:flex;flex-direction:column;gap:6px}
+.ignis-tagged{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border:1px solid var(--ig-line);border-radius:12px;background:var(--ig-surface-2);color:var(--ig-text);font:600 13px var(--ig-font);text-decoration:none;transition:all .15s}
+.ignis-tagged:hover{border-color:var(--ig-accent);background:var(--ig-surface-3);color:var(--ig-accent)}
+.ignis-tagged svg{width:14px;height:14px;opacity:.6}
+.ignis-tagged:hover svg{opacity:1}
+
+.ignis-palette{position:fixed;inset:0;z-index:2147482600;background:var(--ig-overlay);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:flex;align-items:flex-start;justify-content:center;padding-top:12vh}
+.ignis-pal-card{width:min(560px,92vw);background:var(--ig-surface);color:var(--ig-text);border-radius:16px;border:1px solid var(--ig-line);box-shadow:var(--ig-shadow);overflow:hidden;animation:ignisPal .18s ease}
+@keyframes ignisPal{from{opacity:0;transform:translateY(-8px) scale(.99)}to{opacity:1;transform:none}}
+.ignis-pal-inp{width:100%;box-sizing:border-box;border:none;outline:none;background:transparent;color:var(--ig-text);padding:17px 20px;font:500 14px var(--ig-font);border-bottom:1px solid var(--ig-line)}
+.ignis-pal-inp::placeholder{color:var(--ig-text-2)}
+.ignis-pal-list{max-height:48vh;overflow-y:auto;padding:8px;scrollbar-width:thin}
+.ignis-pal-it{padding:10px 12px;border-radius:10px;font:500 13px var(--ig-font);cursor:pointer;display:flex;justify-content:space-between;gap:12px;align-items:center}
+.ignis-pal-it small{font:600 10px var(--ig-mono);color:var(--ig-text-2)}
+.ignis-pal-on{background:var(--ig-accent-soft);color:var(--ig-accent)}
+
+.ignis-bar{position:absolute;top:12px;right:12px;z-index:15;display:flex;flex-direction:row-reverse;gap:6px;padding:6px;border-radius:14px;background:rgba(16,16,20,.62);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,.14);box-shadow:0 8px 24px -8px rgba(0,0,0,.5)}
+.ignis-dl,.ignis-nt,.ignis-th,.ignis-da{width:36px;height:36px;border:none;border-radius:10px;background:transparent;color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s}
+.ignis-dl:hover,.ignis-nt:hover,.ignis-th:hover,.ignis-da:hover{background:rgba(255,255,255,.16);transform:scale(1.06)}
 .ignis-dl:active,.ignis-nt:active,.ignis-th:active,.ignis-da:active{transform:scale(.94)}
+.ignis-dl:focus-visible,.ignis-nt:focus-visible,.ignis-th:focus-visible,.ignis-da:focus-visible{outline:2px solid #fff;outline-offset:1px}
 .ignis-dl svg,.ignis-nt svg,.ignis-th svg,.ignis-da svg{width:17px;height:17px}
 
-.ignis-sb{position:absolute;z-index:12;width:34px;height:34px;border:none;border-radius:10px;background:rgba(255,255,255,.14);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.25);color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s;box-shadow:0 2px 10px rgba(0,0,0,.2)}
-.ignis-sb:hover{background:rgba(255,255,255,.2);transform:scale(1.05)}
-.ignis-sb svg{width:16px;height:16px}
-.ignis-sb-pos{position:absolute;z-index:12;min-width:26px;height:22px;padding:0 6px;border-radius:20px;background:rgba(20,20,24,.7);color:#fff;font:700 10px -apple-system,"Segoe UI",sans-serif;display:flex;align-items:center;justify-content:center;pointer-events:none;letter-spacing:.3px}
-.ignis-pd{position:absolute;top:6px;right:6px;z-index:12;width:32px;height:32px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.8);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);color:#000;display:grid;place-items:center;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3)}
-.ignis-pd svg{width:15px;height:15px}
-.ignis-gd{position:absolute;top:8px;right:8px;z-index:10;width:32px;height:32px;border:none;border-radius:10px;background:rgba(20,20,24,.62);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.14);color:#fff;display:grid;place-items:center;cursor:pointer;opacity:0;transition:opacity .15s ease,transform .12s;box-shadow:0 2px 10px rgba(0,0,0,.25)}
+.ignis-storytools{position:absolute;top:16px;right:16px;z-index:14;display:flex;flex-direction:column;gap:6px;padding:6px;border-radius:16px;background:rgba(16,16,20,.55);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,.14);box-shadow:0 8px 24px -8px rgba(0,0,0,.5)}
+.ignis-sd,.ignis-sn,.ignis-sa,.ignis-st,.ignis-tp,.ignis-sl,.ignis-hd,.ignis-hn,.ignis-ha,.ignis-ht,.ignis-htp,.ignis-hl{width:36px;height:36px;border:none;border-radius:10px;background:transparent;color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s}
+.ignis-sd:hover,.ignis-sn:hover,.ignis-sa:hover,.ignis-st:hover,.ignis-tp:hover,.ignis-sl:hover,.ignis-hd:hover,.ignis-hn:hover,.ignis-ha:hover,.ignis-ht:hover,.ignis-htp:hover,.ignis-hl:hover{background:rgba(255,255,255,.18);transform:scale(1.06)}
+.ignis-sd svg,.ignis-sn svg,.ignis-sa svg,.ignis-st svg,.ignis-tp svg,.ignis-sl svg,.ignis-hd svg,.ignis-hn svg,.ignis-ha svg,.ignis-ht svg,.ignis-htp svg,.ignis-hl svg{width:17px;height:17px}
+.ignis-sb-pos{position:relative;z-index:12;min-width:28px;height:20px;padding:0 7px;border-radius:999px;background:rgba(16,16,20,.72);color:#fff;font:700 10px var(--ig-font);display:flex;align-items:center;justify-content:center;pointer-events:none;letter-spacing:.04em;border:1px solid rgba(255,255,255,.14);margin-top:1px}
+
+.ignis-rd{position:absolute;z-index:12;width:36px;height:36px;border:none;border-radius:11px;background:rgba(16,16,20,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.16);color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s;box-shadow:0 4px 14px rgba(0,0,0,.3)}
+.ignis-rd:hover{background:rgba(255,255,255,.18);transform:scale(1.05)}
+.ignis-rd svg{width:17px;height:17px}
+.ignis-rn{position:absolute;z-index:12;width:36px;height:36px;border:none;border-radius:11px;background:rgba(16,16,20,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.16);color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s;box-shadow:0 4px 14px rgba(0,0,0,.3)}
+.ignis-rn:hover{background:rgba(255,255,255,.18);transform:scale(1.05)}
+.ignis-rn svg{width:17px;height:17px}
+.ignis-pd{position:absolute;top:8px;right:8px;z-index:12;width:34px;height:34px;border-radius:11px;border:1px solid rgba(255,255,255,.4);background:rgba(16,16,20,.55);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);color:#fff;display:grid;place-items:center;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.3);transition:all .12s}
+.ignis-pd:hover{background:rgba(255,255,255,.18);transform:scale(1.05)}
+.ignis-pd svg{width:16px;height:16px}
+.ignis-gd{position:absolute;top:8px;right:8px;z-index:10;width:34px;height:34px;border:none;border-radius:11px;background:rgba(16,16,20,.62);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.14);color:#fff;display:grid;place-items:center;cursor:pointer;opacity:0;transition:opacity .15s ease,transform .12s;box-shadow:0 4px 14px rgba(0,0,0,.3)}
 a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:scale(1.06)}
 .ignis-gd svg{width:16px;height:16px}
 
-.ignis-ksh{position:fixed;inset:0;z-index:2147482500;background:rgba(0,0,0,.6);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center}
-.ignis-ksh-card{background:var(--ig-surface);color:var(--ig-text);border-radius:var(--ig-radius);padding:22px 26px;max-width:min(560px,92vw);box-shadow:var(--ig-shadow);font:500 13px/2 -apple-system,"Segoe UI",sans-serif}
-.ignis-ksh-card h3{margin:0 0 8px;font-size:15px}
+.ignis-ksh{position:fixed;inset:0;z-index:2147482500;background:var(--ig-overlay);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;padding:24px}
+.ignis-ksh-card{background:var(--ig-surface);color:var(--ig-text);border-radius:var(--ig-radius);padding:24px 28px;max-width:min(580px,100%);box-shadow:var(--ig-shadow);font:500 13px/2 var(--ig-font);border:1px solid var(--ig-line)}
+.ignis-ksh-card h3{margin:0 0 12px;font-size:16px;letter-spacing:-.01em}
 .ignis-ksh-card table{border-collapse:collapse;width:100%}
-.ignis-ksh-card td{padding:3px 0;border-bottom:1px solid var(--ig-line)}
+.ignis-ksh-card td{padding:4px 0;border-bottom:1px solid var(--ig-line)}
 .ignis-ksh-card td:last-child{text-align:right;color:var(--ig-text-2)}
-.ignis-ksh-card .ignis-hint{margin-top:10px;text-align:center;font-size:11px;color:var(--ig-text-2)}
+.ignis-ksh-card .ignis-hint{margin-top:12px;text-align:center;font-size:11px;color:var(--ig-text-2)}
+.ignis-ksh-card kbd{background:var(--ig-surface-2);border:1px solid var(--ig-line);border-bottom-width:2px;border-radius:6px;padding:2px 8px;font:600 10px var(--ig-mono)}
+
+.ignis-rename{display:flex;flex-direction:column;gap:14px}
+.ignis-rename-preview{background:var(--ig-surface-2);border:1px solid var(--ig-line);border-radius:12px;padding:12px 14px;font:500 12px var(--ig-mono);color:var(--ig-text);word-break:break-all}
+.ignis-rename-preview small{display:block;font:600 9px var(--ig-font);color:var(--ig-text-2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:5px}
+.ignis-chips{display:flex;flex-wrap:wrap;gap:6px}
+.ignis-chip{border:1px solid var(--ig-line);background:var(--ig-surface-2);color:var(--ig-text-2);border-radius:999px;padding:4px 9px;font:600 10px var(--ig-mono);cursor:pointer;transition:all .12s}
+.ignis-chip:hover{border-color:var(--ig-accent);color:var(--ig-accent);background:var(--ig-accent-soft)}
+.ignis-divider{height:1px;background:var(--ig-line);margin:4px 0}
+@media (max-width:560px){
+  .ignis-modal{padding:10px}
+  .ignis-modal-card{max-height:94vh;border-radius:16px}
+  .ignis-modal-head{padding:14px 16px}
+  .ignis-modal-body{padding:12px}
+  .ignis-modal-foot{flex-wrap:wrap;justify-content:stretch;gap:8px;padding:12px}
+  .ignis-modal-foot .ignis-btn{flex:1 1 auto;justify-content:center}
+  .ignis-foot-gap,.ignis-modal-foot .ignis-hint{display:none}
+  .ignis-sel{width:100%;order:-1}
+  .ignis-card-body{padding:8px 10px 2px}
+  .ignis-actions{padding:4px 6px 8px}
+  .ignis-row{padding:10px}
+}
 `;
 
   GM_addStyle(INTERNAL_CSS);
@@ -2036,8 +2737,16 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         }, 220);
         var i = ModalStack.modals.indexOf(api);
         if (i > -1) ModalStack.modals.splice(i, 1);
+        $(document).off("keydown.igmodal", onKey);
       },
     };
+    function onKey(e) {
+      if (e.key !== "Escape") return;
+      if (ModalStack.modals[ModalStack.modals.length - 1] !== api) return;
+      e.preventDefault();
+      api.close();
+    }
+    $(document).on("keydown.igmodal", onKey);
     closeBtn.on("click", api.close);
     var cardEl = card[0];
     head.css("cursor", "grab");
@@ -2207,53 +2916,73 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       body.append('<div class="ignis-empty">No downloadable media found.</div>');
       return;
     }
-    var frag = $(document.createDocumentFragment());
+    var grid = $('<div class="ignis-grid">');
     items.forEach(function (item, i) {
-      var row = $('<div class="ignis-item" data-idx="' + i + '">');
-      var check = $(
-        '<label class="ignis-check" title="Select"><input type="checkbox" checked><span></span></label>'
+      item._igSourceIndex = i + 1;
+      var row = $('<div class="ignis-item is-selected" data-idx="' + i + '">');
+      var input = $('<input type="checkbox" checked tabindex="-1" aria-hidden="true">');
+      var media = $('<div class="ignis-card-media">');
+      if (item.thumb) {
+        media.append('<img class="ignis-thumb" loading="lazy" src="' + esc(item.thumb) + '" alt="">');
+      } else {
+        media.append('<div class="ignis-thumb-empty">' + SVG.THUMBNAIL + "</div>");
+      }
+      media.append(
+        '<span class="ignis-checkmark" role="checkbox" tabindex="0" aria-checked="true" aria-label="Select item"></span>',
+        '<span class="ignis-badge">' + (item.isVideo ? "VIDEO" : "IMAGE") + "</span>"
       );
-      var thumb = item.thumb
-        ? '<img class="ignis-thumb" loading="lazy" src="' + esc(item.thumb) + '" alt="">'
-        : '<div class="ignis-thumb"></div>';
       var dims = item.width || item.height ? item.width + "×" + item.height + " · " : "";
       var type =
-        '<div class="ignis-type">' +
-        (item.isVideo ? "<b>VIDEO</b>" : "<b>IMAGE</b>") +
-        " " +
+        '<div class="ignis-type"><b>' +
+        (item.isVideo ? "Video" : "Image") +
+        "</b><span>" +
         esc(dims) +
         esc(item.ext || "") +
-        "</div>";
+        "</span></div>";
       var cap = item.caption
-        ? '<div class="ignis-cap">' + esc(item.caption.slice(0, 220)) + "</div>"
+        ? '<div class="ignis-cap">' + esc(item.caption.slice(0, 180)) + "</div>"
         : "";
       var actions = $('<div class="ignis-actions">');
       actions.append(
-        '<button class="ignis-act ig-act-dl" title="Download">' + SVG.DOWNLOAD + "</button>",
-        '<button class="ignis-act ig-act-nt" title="Open in new tab">' + SVG.NEW_TAB + "</button>"
+        '<button class="ignis-act ig-act-dl" title="Download" aria-label="Download">' + SVG.DOWNLOAD + "</button>",
+        '<button class="ignis-act ig-act-nt" title="Open in new tab" aria-label="Open in new tab">' + SVG.NEW_TAB + "</button>"
       );
       if (item.thumb && item.isVideo) {
         actions.append(
-          '<button class="ignis-act ig-act-th" title="Download thumbnail">' + SVG.THUMBNAIL + "</button>"
+          '<button class="ignis-act ig-act-th" title="Download thumbnail" aria-label="Download thumbnail">' + SVG.THUMBNAIL + "</button>"
         );
       }
       if (item.caption) {
         actions.append(
-          '<button class="ignis-act ig-act-cap" title="Download caption (.txt)">' + SVG.TEXT + "</button>"
+          '<button class="ignis-act ig-act-cap" title="Download caption (.txt)" aria-label="Download caption">' + SVG.TEXT + "</button>"
         );
       }
-      row.append(check, thumb, $('<div class="ignis-meta">').append(type, cap), actions);
-      frag.append(row);
+      row.append(input, media, $('<div class="ignis-card-body">').append(type, cap), actions);
+      grid.append(row);
     });
-    body.append(frag);
+    body.append(grid);
     body.off(".igitem").on("click.igitem", ".ignis-item", function (e) {
+      if ($(e.target).closest(".ignis-checkmark").length) {
+        var cb = $(this).find('input[type="checkbox"]')[0];
+        if (cb) {
+          cb.checked = !cb.checked;
+          $(this).toggleClass("is-selected", cb.checked);
+          $(e.target).closest(".ignis-checkmark").attr("aria-checked", cb.checked ? "true" : "false");
+          $(cb).trigger("change");
+        }
+        e.preventDefault();
+        return;
+      }
       var act = $(e.target).closest(".ignis-act")[0];
       if (!act) return;
       e.stopPropagation();
       var idx = parseInt($(this).attr("data-idx"), 10);
       var item = items[idx];
       if (!item) return;
-      var photoMeta = Object.assign({}, meta, { sourceType: item.isVideo ? "video" : "photo" });
+      var photoMeta = Object.assign({}, meta, {
+        sourceType: item.isVideo ? "video" : "photo",
+        index: item._igSourceIndex || idx + 1,
+      });
       if (act.classList.contains("ig-act-dl")) {
         downloadResource(item, photoMeta, {});
       } else if (act.classList.contains("ig-act-nt")) {
@@ -2268,11 +2997,78 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         );
         Stats.record("caption", 0);
       }
+    }).on("keydown.igitem", ".ignis-checkmark", function (e) {
+      if (e.key === " " || e.key === "Enter") {
+        e.preventDefault();
+        $(this).trigger("click");
+      }
     });
   }
 
+  function attachSelectionFooter(modal, getItems, getMeta, extra) {
+    var selectAll = $(
+      '<label class="ignis-sel" title="Select / deselect all"><input type="checkbox" checked><span></span>Select all<b class="ignis-count"></b></label>'
+    );
+    var countBadge = selectAll.find(".ignis-count");
+    var dlSel = $(
+      '<button class="ignis-btn ignis-btn-pri" disabled>' + SVG.DOWNLOAD + " Download Selected</button>"
+    );
+    var dlAll = $(
+      '<button class="ignis-btn ignis-btn-sec">' + SVG.DOWNLOAD_ALL + " Download All</button>"
+    );
+
+    function refresh() {
+      var checks = modal.body.find('.ignis-item input[type="checkbox"]');
+      var total = checks.length;
+      var selected = checks.filter(":checked").length;
+      selectAll.find("input").prop("checked", total > 0 && selected === total);
+      selectAll.find("input").prop("indeterminate", selected > 0 && selected < total);
+      countBadge.text(total ? selected + "/" + total : "");
+      dlSel.prop("disabled", selected === 0);
+      modal.body.find(".ignis-item").each(function () {
+        var checked = !!$(this).find('input[type="checkbox"]').prop("checked");
+        $(this).toggleClass("is-selected", checked);
+        $(this).find(".ignis-checkmark").attr("aria-checked", checked ? "true" : "false");
+      });
+    }
+
+    function selectedItems() {
+      var items = getItems();
+      var out = [];
+      modal.body.find(".ignis-item").each(function () {
+        if ($(this).find('input[type="checkbox"]').prop("checked")) {
+          var idx = parseInt($(this).attr("data-idx"), 10);
+          if (items[idx]) out.push(items[idx]);
+        }
+      });
+      return out;
+    }
+
+    selectAll.find("input").on("change", function () {
+      modal.body.find('.ignis-item input[type="checkbox"]').prop("checked", this.checked);
+      refresh();
+    });
+    modal.body.off("change.igsel").on("change.igsel", '.ignis-item input[type="checkbox"]', refresh);
+    dlSel.on("click", function () {
+      var selected = selectedItems();
+      if (!selected.length) {
+        Toasts.info("Select at least one item to download.");
+        return;
+      }
+      batchDownload(selected, getMeta());
+    });
+    dlAll.on("click", function () {
+      batchDownload(getItems(), getMeta());
+    });
+
+    modal.foot.append(selectAll, '<span class="ignis-foot-gap"></span>', dlSel, dlAll);
+    if (extra) modal.foot.append(extra);
+    refresh();
+    return { refresh: refresh, selectedItems: selectedItems };
+  }
+
   async function openPostDialog(postPath, ctx) {
-    var modal = createModal({ title: "Download", sub: postPath });
+    var modal = createModal({ title: "Download post", sub: postPath });
     modal.body.append('<div class="ignis-load"><i></i>Loading media…</div>');
     var loaded;
     try {
@@ -2285,53 +3081,21 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
     if (!modal.el.is(":visible")) return loaded;
     var current = { items: loaded.items, meta: loaded.meta };
+    function updateHead() {
+      var user = current.meta && current.meta.username && current.meta.username !== "NONE" ? "@" + current.meta.username + " · " : "";
+      modal.title.find(".ignis-sub").text(user + current.items.length + " item" + (current.items.length === 1 ? "" : "s"));
+    }
     renderItems(modal.body, current.items, current.meta);
-    var selectAll = $(
-      '<label class="ignis-sel" title="Select / deselect all"><input type="checkbox" checked><span></span>Select all<b class="ignis-count"></b></label>'
-    );
-    var countBadge = selectAll.find(".ignis-count");
-    function refresh() {
-      var checks = modal.body.find('.ignis-item input[type="checkbox"]');
-      var total = checks.length;
-      var sel = checks.filter(":checked").length;
-      selectAll.find("input").prop("checked", total > 0 && sel === total);
-      selectAll.find("input").prop("indeterminate", sel > 0 && sel < total);
-      countBadge.text(total ? sel + "/" + total : "");
-      dlSel.prop("disabled", sel === 0);
-    }
-    var dlSel = $(
-      '<button class="ignis-btn ignis-btn-pri" disabled>' + SVG.DOWNLOAD + " Download Selected</button>"
-    );
-    var dlAll = $(
-      '<button class="ignis-btn ignis-btn-sec">' + SVG.DOWNLOAD_ALL + " Download All</button>"
-    );
-    modal.foot.append(selectAll, '<span class="ignis-foot-gap"></span>', dlSel, dlAll);
-    selectAll.find("input").on("change", function () {
-      modal.body.find('.ignis-item input[type="checkbox"]').prop("checked", this.checked);
-      refresh();
-    });
-    modal.body.on("change.igsel", '.ignis-item input[type="checkbox"]', refresh);
-    function selectedItems() {
-      var out = [];
-      modal.body.find(".ignis-item").each(function () {
-        if ($(this).find('input[type="checkbox"]').prop("checked")) {
-          var idx = parseInt($(this).attr("data-idx"), 10);
-          if (current.items[idx]) out.push(current.items[idx]);
-        }
-      });
-      return out;
-    }
-    dlSel.on("click", function () {
-      var sel = selectedItems();
-      if (!sel.length) {
-        Toasts.info("Select at least one item to download.");
-        return;
+    updateHead();
+    var selection = attachSelectionFooter(
+      modal,
+      function () {
+        return current.items;
+      },
+      function () {
+        return current.meta;
       }
-      batchDownload(sel, Object.assign({}, current.meta, { sourceType: "post" }));
-    });
-    dlAll.on("click", function () {
-      batchDownload(current.items, Object.assign({}, current.meta, { sourceType: "post" }));
-    });
+    );
     if (loaded.fromDom) {
       getPostPayload(postPath)
         .then(function (payload) {
@@ -2340,12 +3104,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
             current.items = rich.items;
             current.meta = rich.meta;
             renderItems(modal.body, current.items, current.meta);
-            refresh();
+            updateHead();
+            selection.refresh();
           }
         })
         .catch(function () {});
     }
-    refresh();
     return loaded;
   }
 
@@ -2370,51 +3134,116 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     };
     var modal = createModal({
       title: type === "highlights" ? "Highlights" : "Stories",
-      sub: username,
+      sub: "@" + username + " · " + items.length + " item" + (items.length === 1 ? "" : "s"),
     });
     renderItems(modal.body, items, meta);
-    var dlAll = $(
-      '<button class="ignis-btn ignis-btn-pri">' + SVG.DOWNLOAD_ALL + " Download All</button>"
+    var hint = $('<span class="ignis-hint">' + items.length + " item" + (items.length === 1 ? "" : "s") + "</span>");
+    attachSelectionFooter(
+      modal,
+      function () {
+        return items;
+      },
+      function () {
+        return meta;
+      },
+      hint
     );
-    modal.foot.append(dlAll, '<span class="ignis-hint">' + items.length + " items</span>");
-    dlAll.on("click", function () {
-      batchDownload(items, meta);
-    });
     return modal;
   }
 
-  async function downloadStoryAll(payload, type) {
-    var reel = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0];
-    if (!reel) {
-      Toasts.error("No stories available for this account.");
-      return;
+  function openRenameEditor() {
+    var modal = createModal({ title: "Filename template", sub: "Auto rename" });
+    var wrap = $('<div class="ignis-rename">');
+    var inp = $(
+      '<input class="ignis-inp" spellcheck="false" value="' + esc(state.fileRenameFormat) + '" aria-label="Filename template">'
+    );
+    var preview = $('<div class="ignis-rename-preview"><small>Preview</small><span></span></div>');
+    var previewText = preview.find("span");
+    var keys = ["USERNAME", "SOURCE_TYPE", "SHORTCODE", "YEAR", "2-YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "ORIGINAL_NAME", "ORIGINAL_NAME_FIRST", "INDEX", "UID"];
+    var chips = $('<div class="ignis-chips">');
+    keys.forEach(function (key) {
+      chips.append('<button type="button" class="ignis-chip" data-token="%' + key + '%">%' + key + "%</button>");
+    });
+    ["-", "_", ".", " ", "(", ")", "[", "]"].forEach(function (sep) {
+      chips.append('<button type="button" class="ignis-chip" data-token="' + esc(sep) + '">' + (sep === " " ? "space" : esc(sep)) + "</button>");
+    });
+
+    function previewName(format) {
+      var now = new Date();
+      var tokens = {
+        USERNAME: "instagram",
+        SOURCE_TYPE: "post",
+        SHORTCODE: "C1a2B3c4D5e",
+        YEAR: String(now.getFullYear()),
+        "2-YEAR": String(now.getFullYear()).slice(-2),
+        MONTH: pad2(now.getMonth() + 1),
+        DAY: pad2(now.getDate()),
+        HOUR: pad2(now.getHours()),
+        MINUTE: pad2(now.getMinutes()),
+        SECOND: pad2(now.getSeconds()),
+        ORIGINAL_NAME: "35000000_44444444_n",
+        ORIGINAL_NAME_FIRST: "35000000",
+        INDEX: "1",
+        UID: "123456789",
+      };
+      var name = String(format || "").replace(/%([\w\-]+)%/g, function (m, t) {
+        var up = t.toUpperCase();
+        return tokens[up] != null ? tokens[up] : m;
+      });
+      return sanitizeFilename(name) + ".jpg";
     }
-    var items = normalizeReelItems(reel.items);
-    var username =
-      (reel.user && reel.user.username) ||
-      (reel.owner && reel.owner.username) ||
-      getStoryUsername() ||
-      "NONE";
-    var meta = {
-      username: username,
-      shortcode: reel.id || "",
-      sourceType: type,
-      timestamp: Math.floor(Date.now() / 1000),
-      caption: null,
-    };
-    await batchDownload(items, meta);
+
+    function render() {
+      var format = inp.val();
+      state.fileRenameFormat = format;
+      Store.set("G_RENAME_FORMAT", format);
+      previewText.text(previewName(format) || "—");
+    }
+
+    inp.on("input", render);
+    chips.on("click", "button", function () {
+      var token = $(this).attr("data-token");
+      var el = inp[0];
+      var start = el.selectionStart != null ? el.selectionStart : el.value.length;
+      var end = el.selectionEnd != null ? el.selectionEnd : el.value.length;
+      el.value = el.value.slice(0, start) + token + el.value.slice(end);
+      el.focus();
+      el.selectionStart = el.selectionEnd = start + token.length;
+      render();
+    });
+
+    var actions = $('<div class="ignis-chips">');
+    var reset = $('<button type="button" class="ignis-btn ignis-btn-sec">Reset to default</button>');
+    reset.on("click", function () {
+      inp.val("%USERNAME%-%SOURCE_TYPE%-%SHORTCODE%-%YEAR%%MONTH%%DAY%_%HOUR%%MINUTE%%SECOND%_%ORIGINAL_NAME_FIRST%");
+      render();
+    });
+    actions.append(reset);
+    wrap.append(inp, preview, chips, '<div class="ignis-divider"></div>', actions);
+    modal.body.append(wrap);
+    modal.foot.append($('<button class="ignis-btn ignis-btn-pri">Done</button>').on("click", modal.close));
+    render();
+    setTimeout(function () {
+      inp.trigger("focus");
+    }, 30);
+    return modal;
   }
 
   function showSetting(tab) {
     if (tab) state._igTab = tab;
     if (!CAT_MAP[state._igTab] && state._igTab !== "about") state._igTab = "download";
-    ModalStack.closeTop();
+    while (ModalStack.modals.length) ModalStack.pop();
     $(".ignis-modal").remove();
     var modal = createModal({ title: NAME + " Settings", sub: "v" + VERSION });
+    modal.el.addClass("ignis-modal-wide");
     var tabs = $('<div class="ignis-tabs">');
     var search = $('<input class="ignis-search" type="search" placeholder="Search settings…">');
     var list = $("<div>");
-    modal.body.append(tabs, search, list);
+    var hero = $(
+      '<div class="ignis-hero"><div class="ignis-hero-mark">' + SVG.SPARK + "</div>" +
+        "<div><h3>" + esc(NAME) + "</h3><p>Instagram media downloader · v" + esc(VERSION) + "</p></div></div>"
+    );
+    modal.body.append(hero, tabs, search, list);
 
     function countOn(cat) {
       var n = 0;
@@ -2518,13 +3347,48 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     function buildStatsPanel(onReset) {
       var s = Stats._load();
       var panel = $('<div class="ignis-stats">');
+      var cards = $('<div class="ignis-stat-cards">');
+      [
+        ["Total downloads", String(s.items || 0)],
+        ["Data saved", formatBytes(s.bytes)],
+        ["Sessions", String(s.sessions || 0)],
+        ["Last download", s.lastAt ? new Date(s.lastAt).toLocaleDateString() : "—"],
+      ].forEach(function (pair) {
+        cards.append(
+          '<div class="ignis-stat-card"><small>' +
+            esc(pair[0]) +
+            '</small><span class="ignis-stat-v">' +
+            esc(pair[1]) +
+            "</span></div>"
+        );
+      });
+      panel.append(cards);
+
+      var days = [];
+      var maxCount = 1;
+      for (var i = 13; i >= 0; i--) {
+        var day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+        var count = (s.byDay && s.byDay[day]) || 0;
+        if (count > maxCount) maxCount = count;
+        days.push({ day: day, count: count });
+      }
+      var spark = $('<div class="ignis-spark">');
+      days.forEach(function (entry) {
+        var pct = entry.count ? Math.max(6, Math.round((entry.count / maxCount) * 100)) : 2;
+        spark.append(
+          '<div class="ignis-spark-bar" style="height:' +
+            pct +
+            '%" title="' +
+            esc(entry.day + " · " + entry.count + " downloads") +
+            '"></div>'
+        );
+      });
+      panel.append('<div class="ignis-stats-h">Last 14 days</div>', spark);
       panel.append(
-        statRow("Total downloads", String(s.items || 0)),
-        statRow("Data saved (approx.)", formatBytes(s.bytes)),
-        statRow("Sessions", String(s.sessions || 0)),
         statRow("Tracking since", s.firstDay ? new Date(s.firstDay).toLocaleDateString() : "—"),
         statRow("Last download", s.lastAt ? new Date(s.lastAt).toLocaleString() : "—")
       );
+
       var types = Object.keys(s.byType || {}).sort(function (a, b) {
         return s.byType[b] - s.byType[a];
       });
@@ -2535,7 +3399,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         });
       }
       panel.append(
-        '<div style="padding:10px 12px"><button class="ignis-btn ignis-btn-sec">Reset statistics</button></div>'
+        '<div style="padding:14px 4px 4px"><button class="ignis-btn ignis-btn-sec">Reset statistics</button></div>'
       );
       panel.find("button").on("click", function () {
         Stats.reset();
@@ -2549,13 +3413,21 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       list.empty();
       if (state._igTab === "about") {
         list.append(
-          '<div class="ignis-about"><b>' + NAME + " v" + VERSION + '</b> — clean download-focused build.<div class="ignis-rt">' +
-            ["Ignis Core", "Ignis Lens", "Ignis Forge", "Ignis Render", "Ignis Pulse"]
+          '<div class="ignis-about">' +
+            "<b>" + NAME + " v" + VERSION + "</b> downloads media from Instagram pages: posts, carousels, reels, stories, highlights, HD avatars and captions." +
+            '<div class="ignis-rt">' +
+            ["IGNIS Core", "IGNIS Lens", "IGNIS Forge", "IGNIS Render", "IGNIS Pulse"]
               .map(function (r) {
                 return "<span>" + esc(r) + "</span>";
               })
               .join("") +
-            '</div>All processing is local. Network requests go only to Instagram/CDN hosts. IGNIS is an independent project.</div>'
+            "</div>" +
+            "All processing is local. Network requests go only to Instagram and its CDN hosts. Nothing is sent anywhere else." +
+            '<div class="ignis-divider" style="margin:14px 0"></div>' +
+            '<a href="https://github.com/mheci/Ignis" target="_blank" rel="noopener noreferrer">Project page</a> · ' +
+            '<a href="https://github.com/mheci/Ignis/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>' +
+            '<p class="ignis-hint" style="margin-top:12px">Independent project, unaffiliated with Instagram. GPL-3.0-only.</p>' +
+            "</div>"
         );
         return;
       }
@@ -2586,7 +3458,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
             '<div class="ignis-row ignis-row-wrap' + (disabled ? " ignis-row-dis" : "") + '" data-set="' + k + '">'
           );
           var sw = $(
-            '<label class="ignis-sw"><input type="checkbox" ' +
+            '<label class="ignis-sw"><input type="checkbox" aria-label="' + esc(LABEL[k]) + '" ' +
               (USER_SETTING[k] ? "checked" : "") +
               (disabled ? "disabled" : "") +
               "><i></i></label>"
@@ -2599,6 +3471,9 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
               ),
             sw
           );
+          if (k === "AUTO_RENAME") {
+            row.find(".ignis-row-txt").css("cursor", "pointer").on("click", openRenameEditor);
+          }
           list.append(row);
         });
       if (!list.children().length) {
@@ -2633,26 +3508,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       var $row = $(this);
       var k = $row.attr("data-set");
       if (k !== "AUTO_RENAME") return;
-      if ($row.find(".ignis-row-edit").length) return;
-      var ed = $(
-        '<div class="ignis-row-edit"><input class="ignis-inp" value="' +
-          esc(state.fileRenameFormat) +
-          '" spellcheck="false" title="' +
-          esc("%USERNAME% %SOURCE_TYPE% %SHORTCODE% %YEAR% %2-YEAR% %MONTH% %DAY% %HOUR% %MINUTE% %SECOND% %ORIGINAL_NAME% %ORIGINAL_NAME_FIRST% %INDEX% %UID%") +
-          '">' +
-          SVG.CLOSE +
-          "</div>"
-      );
-      $row.append(ed);
-      var $inp = ed.find("input");
-      $inp.trigger("focus");
-      $inp.on("input", function () {
-        state.fileRenameFormat = $inp.val();
-        Store.set("G_RENAME_FORMAT", state.fileRenameFormat);
-      });
-      ed.children("svg").on("click", function () {
-        ed.remove();
-      });
+      openRenameEditor();
     });
 
     tabs.on("click.igset", ".ignis-tab", function () {
@@ -2713,31 +3569,141 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     );
   }
 
-  function getVisibleNodeIndex($main) {
-    if (!$main || !$main.length) return 0;
-    var hasBackButton = $main.find("button._afxv._al46._al47").length > 0;
-    if (!hasBackButton) return 0;
-    var $viewport = $main
-      .find("*:not([data-pagelet])>*:not([role]):not([data-pagelet])>*>*>*[role]>*>ul[class]")
-      .parent()
-      .parent("[role]");
-    var viewportRect = $viewport[0] ? $viewport[0].getBoundingClientRect() : null;
-    if (!viewportRect || !viewportRect.width) return 0;
-    var best = null;
-    var bestDist = Infinity;
-    $main.find("li[class]").each(function () {
-      var rect = this.getBoundingClientRect();
-      if (!rect.width) return;
-      var dist = Math.abs(rect.right - viewportRect.right);
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = this;
+  function tagCarouselSlides($ul) {
+    if (!$ul || !$ul.length) return;
+    var $slides = $ul.children("li").filter(function () {
+      var w = this.getBoundingClientRect().width;
+      return w > 64 && ($(this).find("img, video").length > 0 || $(this).attr("class"));
+    });
+    if (!$slides.length) return;
+
+    var slideWidth = 0;
+    $slides.each(function () {
+      var w = this.getBoundingClientRect().width;
+      if (w > 64 && !slideWidth) slideWidth = w;
+    });
+    if (!slideWidth) {
+      $slides.each(function () {
+        var m = ($(this).children("div").first().attr("style") || "").match(/width:\s*(\d+(?:\.\d+)?)px/);
+        if (m && !slideWidth) slideWidth = parseFloat(m[1]);
+      });
+    }
+    if (!slideWidth) {
+      var viewport = $ul.parent()[0];
+      slideWidth = viewport ? viewport.getBoundingClientRect().width : 0;
+    }
+
+    $slides.each(function () {
+      var li = this;
+      var style = li.getAttribute("style") || "";
+      if (style.indexOf("translateX") > -1 && slideWidth > 0) {
+        var m = style.match(/translateX\(([^p]+)px\)/);
+        if (m && m[1]) {
+          var pos = Math.round(parseFloat(m[1]) / slideWidth) + 1;
+          if (pos > 0) {
+            li.setAttribute("igh-res-index", String(pos));
+            return;
+          }
+        }
+      }
+      if (!li.hasAttribute("igh-res-index")) {
+        var prev = li.previousElementSibling;
+        var next = li.nextElementSibling;
+        if (prev && prev.hasAttribute("igh-res-index")) {
+          var prevPos = parseInt(prev.getAttribute("igh-res-index"), 10);
+          if (!isNaN(prevPos) && prevPos > 0) li.setAttribute("igh-res-index", String(prevPos + 1));
+        } else if (next && next.hasAttribute("igh-res-index")) {
+          var nextPos = parseInt(next.getAttribute("igh-res-index"), 10);
+          if (!isNaN(nextPos) && nextPos > 1) li.setAttribute("igh-res-index", String(nextPos - 1));
+        }
       }
     });
-    if (!best) return 0;
-    var m = ((best.style && best.style.transform) || "").match(/translateX\(([^p]+)px\)/);
-    if (!m) return 0;
-    return Math.max(0, Math.round(Math.abs(parseFloat(m[1])) / viewportRect.width));
+  }
+
+  function isActivePostRoute() {
+    return /^\/(?:[^/]+\/)?(?:p|reel)\//.test(location.pathname);
+  }
+
+  function getVisibleNodeIndex($main) {
+    if (!$main || !$main.length) return 0;
+
+    if (isActivePostRoute()) {
+      try {
+        var imgIndex = new URLSearchParams(window.location.search).get("img_index");
+        if (imgIndex) {
+          var parsedUrlIndex = parseInt(imgIndex, 10);
+          if (!isNaN(parsedUrlIndex) && parsedUrlIndex >= 1) return parsedUrlIndex - 1;
+        }
+      } catch (e) {
+
+      }
+    }
+
+    var $ul = $main.find("ul[class]").filter(function () {
+      return $(this).children("li").length > 0;
+    }).first();
+    if (!$ul.length) return 0;
+
+    tagCarouselSlides($ul);
+
+    var $slides = $ul.children("li").filter(function () {
+      var w = this.getBoundingClientRect().width;
+      return w > 64 && ($(this).find("img, video").length > 0 || $(this).attr("class"));
+    });
+    if ($slides.length <= 1) {
+      if ($slides.length === 1) {
+        var onlyPos = $slides.get(0).getAttribute("igh-res-index");
+        var onlyParsed = onlyPos ? parseInt(onlyPos, 10) : NaN;
+        if (!isNaN(onlyParsed) && onlyParsed >= 1) return onlyParsed - 1;
+      }
+      return 0;
+    }
+
+    var $viewport = $main.find(".button_wrapper").parent();
+    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) {
+      $viewport = $main
+        .find('*:not([data-pagelet])>*:not([role]):not([data-pagelet])>*:not([style])>*>*[role="presentation"]>*>ul[class]')
+        .parent()
+        .parent("[role]");
+    }
+    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) $viewport = $ul.parent().parent();
+    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) $viewport = $ul.parent();
+
+    if ($viewport.length) {
+      var viewportRect = $viewport.get(0).getBoundingClientRect();
+      var fallbackWidth = viewportRect.width;
+      if (fallbackWidth > 0) {
+        var viewportCenter = (viewportRect.left + viewportRect.right) / 2;
+        var closestSlide = null;
+        var minDistance = Infinity;
+        $slides.each(function () {
+          if (this.getBoundingClientRect().width === 0) return;
+          var rect = this.getBoundingClientRect();
+          var distance = Math.abs((rect.left + rect.right) / 2 - viewportCenter);
+          if (distance < minDistance) {
+            minDistance = distance;
+            closestSlide = this;
+          }
+        });
+        if (closestSlide) {
+          var ighPos = closestSlide.getAttribute("igh-res-index");
+          var parsedPos = ighPos ? parseInt(ighPos, 10) : NaN;
+          if (!isNaN(parsedPos) && parsedPos >= 1) return parsedPos - 1;
+          var style = closestSlide.getAttribute("style") || "";
+          var offsetMatch = style.match(/translateX\(([^p]+)px\)/);
+          if (offsetMatch && offsetMatch[1]) {
+            var offset = parseFloat(offsetMatch[1]);
+            var width = closestSlide.getBoundingClientRect().width || fallbackWidth;
+            if (width > 0) {
+              var offsetIndex = Math.round(offset / width);
+              if (offsetIndex >= 0) return offsetIndex;
+            }
+          }
+          return Math.max(0, $slides.index(closestSlide));
+        }
+      }
+    }
+    return 0;
   }
 
   let sharedIO = null;
@@ -3047,10 +4013,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       if ($(this).children().length > 0) current = i + 1;
     });
     if (!current) return;
-    var $counter = $element.find("." + className).first();
+    var $target = $element.find(".ignis-storytools").first();
+    if (!$target.length) $target = $element;
+    var $counter = $target.find("." + className).first();
     if (!$counter.length) {
       $counter = $('<div class="' + className + ' ignis-sb-pos">');
-      $element.append($counter);
+      $target.append($counter);
     }
     $counter.text(current + "/" + total).attr("title", "Item " + current + " of " + total);
   }
@@ -3076,7 +4044,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       var d = Math.abs((item.taken_at_timestamp || 0) - visibleTs);
       if (d < minDiff) {
         minDiff = d;
-        bestId = item.id;
+        bestId = item.pk || item.id;
       }
     });
     return bestId;
@@ -3127,18 +4095,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       }
     }
     if (!target) {
-      var countA = document.querySelectorAll(
-        "body > div section._ac0a header._ac0k > ._ac3r ._ac3n ._ac3p[style]"
-      ).length;
-      var countB = document.querySelectorAll(
-        "body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6"
-      ).length;
+      var countA = $("body > div section._ac0a header._ac0k > ._ac3r ._ac3n ._ac3p[style]").length;
+      var countB = $("body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
       var countC = 0;
-      var base = document.querySelector(
-        "body > div div:not([hidden]) section:visible > div div[style]:not([class]) > div"
-      );
+      var base = $("body > div div:not([hidden]) section:visible > div div[style]:not([class]) > div")[0];
       if (base) {
-        countC = base.querySelectorAll("div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
+        countC = $(base).find("div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
       }
       var nowIndex = countA || countB || countC;
       if (nowIndex > 0 && nowIndex <= items.length) {
@@ -3149,13 +4111,25 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     return { items: items, target: target };
   }
 
-  async function downloadStoryCurrent(type, isPreview) {
+  function getStoryScopeUsername(type) {
     var username = type === "highlights" ? getHighlightsStoryUsername() : getStoryUsername();
     if (!username) {
       var parts = location.pathname.split("/").filter(Boolean);
-      if (parts[0] === "stories" && parts[1]) username = parts[1];
+      if (parts[0] === "stories" && parts[1] && parts[1] !== "highlights") username = parts[1];
     }
-    if (!username) {
+    if (username && username.toLowerCase() === "highlights") username = null;
+    return username || null;
+  }
+
+  function resolveStoryOwner(payload, fallback) {
+    var reel = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0];
+    var owner = reel && (reel.user || reel.owner);
+    return (owner && owner.username) || fallback || null;
+  }
+
+  async function downloadStoryCurrent(type, isPreview) {
+    var username = getStoryScopeUsername(type);
+    if (!username && type !== "highlights") {
       Toasts.error("Cannot resolve the account name.");
       return;
     }
@@ -3166,7 +4140,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       if (isFinite(d) && d > 0) ts = Math.floor(d);
     }
     var hasVideo = $("body > div section:visible video[playsinline]").length > 0;
-    if (!hasVideo) {
+    if (!hasVideo && username) {
       var $img = $(
         "body > div section:visible img[referrerpolicy][class], body > div section:visible img._aa63"
       ).first();
@@ -3187,9 +4161,14 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
     var payload;
     try {
-      payload = await loadStoryPayload(username, type);
+      payload = await loadStoryPayload(username || "", type);
     } catch (e) {
       Toasts.error("Could not load story data: " + ((e && e.message) || "network error"));
+      return;
+    }
+    username = resolveStoryOwner(payload, username);
+    if (!username) {
+      Toasts.error("Cannot resolve the account name.");
       return;
     }
     var t = await resolveStoryTarget(payload, urlStoryId());
@@ -3220,28 +4199,29 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       }
     }
     if (isPreview) openNewTab(replaceSameOriginHost(item.url));
-    else await saveFiles(item.url, Object.assign({}, meta, { filetype: item.ext || "mp4" }));
+    else await saveFiles(item.url, Object.assign({}, meta, { filetype: item.ext || "mp4", thumbnailURL: item.thumb }));
   }
 
   async function downloadStoryThumbnail(type) {
-    var username = type === "highlights" ? getHighlightsStoryUsername() : getStoryUsername();
-    if (!username) {
-      var parts = location.pathname.split("/").filter(Boolean);
-      if (parts[0] === "stories" && parts[1]) username = parts[1];
-    }
-    if (!username) {
+    var username = getStoryScopeUsername(type);
+    if (!username && type !== "highlights") {
       Toasts.error("Cannot resolve the account name.");
       return;
     }
     try {
-      var payload = await loadStoryPayload(username, type);
+      var payload = await loadStoryPayload(username || "", type);
+      var owner = resolveStoryOwner(payload, username);
+      if (!owner) {
+        Toasts.error("Cannot resolve the account name.");
+        return;
+      }
       var t = await resolveStoryTarget(payload, urlStoryId());
       if (!t || !t.target.thumb) {
         Toasts.error("No thumbnail available.");
         return;
       }
       await saveFiles(t.target.thumb, {
-        username: username,
+        username: owner,
         sourceType: "thumbnail",
         timestamp: t.target.takenAt || Math.floor(Date.now() / 1000),
         shortcode: t.target.id,
@@ -3253,25 +4233,26 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   }
 
   async function downloadStoriesAll(type) {
-    var username = type === "highlights" ? getHighlightsStoryUsername() : getStoryUsername();
-    if (!username) {
-      var parts = location.pathname.split("/").filter(Boolean);
-      if (parts[0] === "stories" && parts[1]) username = parts[1];
-    }
-    if (!username) {
+    var username = getStoryScopeUsername(type);
+    if (!username && type !== "highlights") {
       Toasts.error("Cannot resolve the account name.");
       return;
     }
     try {
-      var payload = await loadStoryPayload(username, type);
+      var payload = await loadStoryPayload(username || "", type);
       var reel = payload.data && payload.data.reels_media && payload.data.reels_media[0];
       var items = normalizeReelItems(reel ? reel.items : []);
       if (!items.length) {
         Toasts.info("No stories available right now.");
         return;
       }
+      var owner = resolveStoryOwner(payload, username);
+      if (!owner) {
+        Toasts.error("Cannot resolve the account name.");
+        return;
+      }
       var meta = {
-        username: username,
+        username: owner,
         shortcode: (reel && reel.id) || "",
         sourceType: type,
         timestamp: Math.floor(Date.now() / 1000),
@@ -3280,7 +4261,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       await batchDownload(items, meta);
       if (type === "stories" && USER_SETTING.DOWNLOAD_STORY_HIGHLIGHTS) {
         try {
-          var userInfo = await getUserId(username);
+          var userInfo = await getUserId(owner);
           var uid = (userInfo.user && (userInfo.user.pk || userInfo.user.id)) || null;
           if (uid) {
             var tray = await getUserHighlights(uid);
@@ -3290,7 +4271,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
               var hItems = normalizeReelItems(hReel ? hReel.items : []);
               if (hItems.length) {
                 await batchDownload(hItems, {
-                  username: username,
+                  username: resolveStoryOwner(hl, owner),
                   shortcode: (hReel && hReel.id) || "",
                   sourceType: "highlights",
                   timestamp: Math.floor(Date.now() / 1000),
@@ -3308,76 +4289,292 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
   }
 
+  function resolveRawStoryItem(payload) {
+    var reel = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0];
+    var items = (reel && reel.items) || [];
+    if (!items.length) return null;
+
+    var urlId = urlStoryId();
+    if (urlId) {
+      for (var i = 0; i < items.length; i++) {
+        var ids = [items[i].id, items[i].pk].filter(function (id) {
+          return id != null;
+        }).map(String);
+        var baseIds = ids.map(function (id) {
+          return id.split("_")[0];
+        });
+        if (ids.indexOf(String(urlId)) > -1 || baseIds.indexOf(String(urlId)) > -1) return items[i];
+      }
+    }
+
+    var $time = $("body > div section:visible time[datetime]")
+      .filter(function () {
+        return (
+          $(this).is(":visible") &&
+          $(this).parents('a[href^="/stories/highlights/"]').length === 0 &&
+          $(this).parents('[role="button"]').length === 0
+        );
+      })
+      .first();
+    if ($time.length) {
+      var visibleTs = Math.floor(new Date($time.attr("datetime")).getTime() / 1000);
+      if (isFinite(visibleTs) && visibleTs) {
+        var best = null;
+        var minDiff = Infinity;
+        items.forEach(function (item) {
+          var diff = Math.abs((item.taken_at_timestamp || item.taken_at || 0) - visibleTs);
+          if (diff < minDiff) {
+            minDiff = diff;
+            best = item;
+          }
+        });
+        if (best && minDiff <= 5) return best;
+      }
+    }
+
+    var countA = $("body > div section._ac0a header._ac0k > ._ac3r ._ac3n ._ac3p[style]").length;
+    var countB = $("body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
+    var nowIndex = countA || countB;
+    if (nowIndex > 0 && nowIndex <= items.length) return items[nowIndex - 1];
+    return items[0];
+  }
+
+  function extractTaggedProfiles(item, excludeUsername) {
+    var profiles = new Map();
+    var stickers = item && Array.isArray(item.story_bloks_stickers) ? item.story_bloks_stickers : [];
+    stickers.forEach(function (sticker) {
+      var username = sticker && sticker.bloks_sticker && sticker.bloks_sticker.sticker_data &&
+        sticker.bloks_sticker.sticker_data.ig_mention && sticker.bloks_sticker.sticker_data.ig_mention.username;
+      if (typeof username !== "string" || !username) return;
+      if (excludeUsername && username.toLowerCase() === excludeUsername.toLowerCase()) return;
+      var key = username.toLowerCase();
+      if (!profiles.has(key)) profiles.set(key, username);
+    });
+    return Array.from(profiles.values());
+  }
+
+  function openTaggedProfilesDialog(usernames, mediaId, errorMessage) {
+    var modal = createModal({
+      title: "Tagged profiles",
+      sub: mediaId ? "media " + String(mediaId).split("_")[0] : "",
+    });
+    if (errorMessage) {
+      modal.body.append('<div class="ignis-empty">' + esc(errorMessage) + "</div>");
+      return modal;
+    }
+    if (!usernames.length) {
+      modal.body.append('<div class="ignis-empty">No profiles are tagged in this story.</div>');
+      return modal;
+    }
+    var list = $('<div class="ignis-tagged-list">');
+    usernames.forEach(function (username) {
+      list.append(
+        '<a class="ignis-tagged" target="_blank" rel="noopener noreferrer" href="https://www.instagram.com/' +
+          encodeURIComponent(username) +
+          '/"><span>@' +
+          esc(username) +
+          "</span>" +
+          SVG.NEW_TAB +
+          "</a>"
+      );
+    });
+    modal.body.append(list);
+    return modal;
+  }
+
+  async function showTaggedProfiles(type) {
+    var username = getStoryScopeUsername(type);
+    if (!username && type !== "highlights") {
+      openTaggedProfilesDialog([], null, "Cannot resolve the account name.");
+      return;
+    }
+    try {
+      var payload = await loadStoryPayload(username || "", type);
+      var item = resolveRawStoryItem(payload);
+      if (!item) {
+        openTaggedProfilesDialog([], null, "Could not identify the active story item.");
+        return;
+      }
+      var owner = resolveStoryOwner(payload, username);
+      var profiles = extractTaggedProfiles(item, owner);
+      openTaggedProfilesDialog(profiles, item.pk || item.id || "", null);
+    } catch (e) {
+      openTaggedProfilesDialog([], null, "Could not load tagged profiles: " + ((e && e.message) || "network error"));
+    }
+  }
+
+  async function openStoryBrowser(type) {
+    var username = getStoryScopeUsername(type);
+    if (!username && type !== "highlights") {
+      Toasts.error("Cannot resolve the account name.");
+      return;
+    }
+    try {
+      var payload = await loadStoryPayload(username || "", type);
+      openStoryDialog(payload, type);
+    } catch (e) {
+      Toasts.error("Could not load the media list: " + ((e && e.message) || "network error"));
+    }
+  }
+
+  function skipStoryConfirm() {
+    if (!USER_SETTING.SKIP_VIEW_STORY_CONFIRM || state.GL_storyConfirmSkipped) return;
+    var $button = $(
+      'div[id^="mount"] section:last-child > div > div:not([class]) div:last-child > div[role="button"]'
+    ).filter(function () {
+      return $(this).children().length === 0 && this.textContent.trim() !== "";
+    });
+    if ($button.length) {
+      $button.first().trigger("click");
+      state.GL_storyConfirmSkipped = true;
+    }
+  }
+
+  function skipSharedWithYouDialog() {
+    if (!USER_SETTING.SKIP_SHARED_WITH_YOU_DIALOG) return;
+    var url;
+    try {
+      url = new URL(window.location.href);
+    } catch (e) {
+      return;
+    }
+    if (!url.searchParams.has("igsh")) return;
+
+    var profileUsername = location.pathname.split("/").filter(Boolean)[0];
+    if (profileUsername) profileUsername = profileUsername.toLowerCase();
+
+    $('div[role="dialog"]').each(function () {
+      var $dialog = $(this);
+      if (!$dialog.is(":visible")) return;
+      var $headers = $dialog.find("h2");
+      if (!$headers.length) return;
+      var isSharedHeader = $headers.filter(function () {
+        var text = (this.textContent || "").trim().toLowerCase();
+        if (!text) return false;
+        if (text.indexOf("shared this with you") > -1) return true;
+        if (text.indexOf("shared with you") > -1) return true;
+        return !!(profileUsername && text.indexOf(profileUsername) > -1 && text.indexOf("shared") > -1);
+      }).length > 0;
+      if (!isSharedHeader) return;
+
+      var $buttons = $dialog.find('div[role="button"]');
+      if (!$buttons.length) return;
+      var $notNow = null;
+      $buttons.each(function () {
+        if ((this.textContent || "").trim().toLowerCase() === "not now") {
+          $notNow = $(this);
+          return false;
+        }
+      });
+      if ((!$notNow || !$notNow.length) && $buttons.length === 2) $notNow = $buttons.last();
+      if ($notNow && $notNow.length) $notNow.trigger("click");
+    });
+  }
+
+  function maybeSkipSharedDialog() {
+    if (!USER_SETTING.SKIP_SHARED_WITH_YOU_DIALOG || !window.location.search.includes("igsh")) return;
+    var tries = 0;
+    var timer = setInterval(function () {
+      if (!window.location.search.includes("igsh") || ++tries > 20) {
+        clearInterval(timer);
+        return;
+      }
+      skipSharedWithYouDialog();
+    }, 200);
+  }
+
+  function ensureStoryTools($host) {
+    if (getComputedStyle($host[0]).position === "static") $host.css("position", "relative");
+    var $bar = $host.children(".ignis-storytools").first();
+    if (!$bar.length) {
+      $bar = $('<div class="ignis-storytools">');
+      $host.append($bar);
+    }
+    return $bar;
+  }
+
   function attachStoryButtons() {
-    if ($(".ignis-sd").length) return;
     var $element = findStoryContainer();
     if (!$element) return;
+    var $bar = ensureStoryTools($element);
     var username = getStoryUsername() || "";
-    $element.append(
-      makeButton(SVG.DOWNLOAD, "Download this story", "ignis-sd").css({ right: "40px", top: "15px" }),
-      makeButton(SVG.NEW_TAB, "Open story in new tab", "ignis-sn").css({ right: "40px", top: "51px" })
-    );
-    if (getStoryProgress(username).length > 1) {
-      $element.append(
-        makeButton(SVG.DOWNLOAD_ALL, "Download all stories", "ignis-sa").css({ right: "40px", top: "87px" })
+    if (!$bar.find(".ignis-sd").length) {
+      $bar.append(
+        makeButton(SVG.DOWNLOAD, "Download this story", "ignis-sd"),
+        makeButton(SVG.NEW_TAB, "Open story in new tab", "ignis-sn")
       );
+    }
+    if (getStoryProgress(username).length > 1 && !$bar.find(".ignis-sa").length) {
+      $bar.append(makeButton(SVG.DOWNLOAD_ALL, "Download all stories", "ignis-sa"));
+    }
+    if (!$bar.find(".ignis-tp").length) {
+      $bar.append(makeButton(SVG.TAGGED_PROFILES, "Show tagged profiles", "ignis-tp"));
+    }
+    if (!$bar.find(".ignis-sl").length) {
+      $bar.append(makeButton(SVG.LIST, "Browse stories", "ignis-sl"));
     }
     setStoryProgressIndexText($element, "ignis-sp-pos", username);
   }
 
   function attachHighlightButtons() {
-    if ($(".ignis-hd").length) return;
     var $element = findStoryContainer();
     if (!$element) return;
+    var $bar = ensureStoryTools($element);
     var username = getHighlightsStoryUsername() || "";
-    $element.append(
-      makeButton(SVG.DOWNLOAD, "Download this highlight", "ignis-hd").css({ right: "40px", top: "15px" }),
-      makeButton(SVG.NEW_TAB, "Open highlight in new tab", "ignis-hn").css({ right: "40px", top: "51px" })
-    );
-    if (getStoryProgress(username).length > 1) {
-      $element.append(
-        makeButton(SVG.DOWNLOAD_ALL, "Download all highlights", "ignis-ha").css({ right: "40px", top: "87px" })
+    if (!$bar.find(".ignis-hd").length) {
+      $bar.append(
+        makeButton(SVG.DOWNLOAD, "Download this highlight", "ignis-hd"),
+        makeButton(SVG.NEW_TAB, "Open highlight in new tab", "ignis-hn")
       );
+    }
+    if (getStoryProgress(username).length > 1 && !$bar.find(".ignis-ha").length) {
+      $bar.append(makeButton(SVG.DOWNLOAD_ALL, "Download all highlights", "ignis-ha"));
+    }
+    if (!$bar.find(".ignis-htp").length) {
+      $bar.append(makeButton(SVG.TAGGED_PROFILES, "Show tagged profiles", "ignis-htp"));
+    }
+    if (!$bar.find(".ignis-hl").length) {
+      $bar.append(makeButton(SVG.LIST, "Browse highlights", "ignis-hl"));
     }
     setStoryProgressIndexText($element, "ignis-hp-pos", username);
   }
 
   function attachStoryThumbnailButton() {
-    var $story = $(".ignis-sd").first().parent();
-    if (!$story.length) return;
-    if ($story.find("video").length === 0) {
-      $story.find(".ignis-st").remove();
+    var $bar = $(".ignis-sd").first().parent();
+    if (!$bar.length) return;
+    var $host = $bar.parent();
+    if ($host.find("video").length === 0) {
+      $bar.find(".ignis-st").remove();
       return;
     }
-    if ($story.find(".ignis-st").length) return;
-    $story.append(
-      makeButton(SVG.THUMBNAIL, "Download story thumbnail", "ignis-st").css({ right: "40px", top: "87px" })
-    );
+    if ($bar.find(".ignis-st").length) return;
+    $bar.append(makeButton(SVG.THUMBNAIL, "Download story thumbnail", "ignis-st"));
   }
 
   function attachHighlightThumbnailButton() {
-    var $hl = $(".ignis-hd").first().parent();
-    if (!$hl.length) return;
-    if ($hl.find("video").length === 0) {
-      $hl.find(".ignis-ht").remove();
+    var $bar = $(".ignis-hd").first().parent();
+    if (!$bar.length) return;
+    var $host = $bar.parent();
+    if ($host.find("video").length === 0) {
+      $bar.find(".ignis-ht").remove();
       return;
     }
-    if ($hl.find(".ignis-ht").length) return;
-    $hl.append(
-      makeButton(SVG.THUMBNAIL, "Download highlight thumbnail", "ignis-ht").css({ right: "40px", top: "87px" })
-    );
+    if ($bar.find(".ignis-ht").length) return;
+    $bar.append(makeButton(SVG.THUMBNAIL, "Download highlight thumbnail", "ignis-ht"));
   }
 
   function scanStoryPage() {
     attachStoryButtons();
-    var $story = $(".ignis-sd").first().parent();
-    if ($story.find("video").length) attachStoryThumbnailButton();
+    skipStoryConfirm();
+    var $host = $(".ignis-sd").first().closest(".ignis-storytools").parent();
+    if ($host.find("video").length) attachStoryThumbnailButton();
   }
 
   function scanHighlightPage() {
     attachHighlightButtons();
-    var $hl = $(".ignis-hd").first().parent();
-    if ($hl.find("video").length) attachHighlightThumbnailButton();
+    skipStoryConfirm();
+    var $host = $(".ignis-hd").first().closest(".ignis-storytools").parent();
+    if ($host.find("video").length) attachHighlightThumbnailButton();
   }
 
   function attachReelBar($main) {
@@ -3422,11 +4619,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
 
   function attachAvatarButton() {
     if ($(".ignis-pd").length) return;
-    var $img = $(
-      'header > *[class]:first-child > *[class]:first-child img[alt], header > *[class]:first-child img[alt]'
-    ).first();
+    var $img = $("header > *[class]:first-child > *[class]:first-child img[alt]").first();
+    if (!$img.length) $img = $("header > *[class]:first-child img[alt]").first();
     if (!$img.length) return;
-    var $mount = $img.parent().parent();
+    var $mount = $img.is("[draggable]") ? $img.parent().parent() : $img.parent().parent().parent();
+    if (!$mount.length) $mount = $img.parent().parent();
+    if (!$mount.length) return;
     $mount.css("position", "relative");
     if ($mount.find(".ignis-pd").length) return;
     $mount.append(makeButton(SVG.DOWNLOAD, "Download profile picture", "ignis-pd"));
@@ -3446,17 +4644,19 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       var userInfo = await getUserId(username);
       var uid = (userInfo.user && (userInfo.user.pk || userInfo.user.id)) || null;
       var url = null;
-      if (USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && userInfo.user._hdUrl) {
-        url = userInfo.user._hdUrl;
-      } else if (USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && uid) {
+      if (USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && uid) {
         try {
-          url = await getUserHdAvatar(uid);
+          url = await getUserHdAvatar(uid, username);
         } catch (e) {
           url = null;
         }
       }
+      if (!url && USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && userInfo.user && userInfo.user._hdUrl) {
+        url = userInfo.user._hdUrl;
+      }
       if (!url) {
-        url = $("header img[alt]").first().attr("src");
+        url = (userInfo.user && (userInfo.user.profile_pic_url || userInfo.user.profile_pic_url_hd)) ||
+          $("header img[alt]").first().attr("src");
       }
       if (!url) {
         Toasts.error("Cannot find profile picture URL.");
@@ -3483,7 +4683,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       if (isHl) attachHighlightButtons();
       else attachStoryButtons();
     }
-    var $host = $(btnSel).first().parent();
+    var $host = $(btnSel).first().closest(".ignis-storytools").parent();
     if (!$host.length) return;
     if ($host.find("video").length) {
       if (isHl) attachHighlightThumbnailButton();
@@ -3627,7 +4827,8 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     });
 
     $body.on("click.ignisEvents", ".ignis-sd", function () {
-      downloadStoryCurrent("stories", false);
+      if (USER_SETTING.DIRECT_DOWNLOAD_STORY) downloadStoriesAll("stories");
+      else downloadStoryCurrent("stories", false);
     });
     $body.on("click.ignisEvents", ".ignis-sn", function () {
       downloadStoryCurrent("stories", true);
@@ -3640,7 +4841,8 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     });
 
     $body.on("click.ignisEvents", ".ignis-hd", function () {
-      downloadStoryCurrent("highlights", false);
+      if (USER_SETTING.DIRECT_DOWNLOAD_STORY) downloadStoriesAll("highlights");
+      else downloadStoryCurrent("highlights", false);
     });
     $body.on("click.ignisEvents", ".ignis-hn", function () {
       downloadStoryCurrent("highlights", true);
@@ -3650,6 +4852,18 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     });
     $body.on("click.ignisEvents", ".ignis-ht", function () {
       downloadStoryThumbnail("highlights");
+    });
+    $body.on("click.ignisEvents", ".ignis-tp", function () {
+      showTaggedProfiles("stories");
+    });
+    $body.on("click.ignisEvents", ".ignis-htp", function () {
+      showTaggedProfiles("highlights");
+    });
+    $body.on("click.ignisEvents", ".ignis-sl", function () {
+      openStoryBrowser("stories");
+    });
+    $body.on("click.ignisEvents", ".ignis-hl", function () {
+      openStoryBrowser("highlights");
     });
 
     $body.on("click.ignisEvents", ".ignis-rd", function () {
@@ -3669,6 +4883,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       state.firstStarted = true;
       state.currentURL = location.href;
       state.route = null;
+      state.GL_storyConfirmSkipped = false;
       var path = location.pathname;
       var blacklist =
         /^\/(challenge\/?.*|qr\/?|accounts\/.*|emails\/.*|language\/?.*?|your_activity\/?.*|settings\/help(\/.*)?|auth_platform\/codeentry\/?.*|consent\/?.*)$/i;
@@ -3701,6 +4916,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       }
       state.pageLoaded = true;
       this.cleanup();
+      maybeSkipSharedDialog();
 
       if (!domObserver || !domObserverRoot || !domObserverRoot.isConnected) {
         installDomObserver();
@@ -3747,7 +4963,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       var now = Date.now();
       Object.keys(state.GL_payloadCache).forEach(function (k) {
         var c = state.GL_payloadCache[k];
-        if (!c || now - c.ts > 600000) delete state.GL_payloadCache[k];
+        if (!c || now - c.ts > POST_CACHE_MAX_AGE) delete state.GL_payloadCache[k];
       });
 
       var dcCount =
@@ -3774,6 +4990,219 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     },
   };
 
+  function idbRequest(request) {
+    return new Promise(function (resolve, reject) {
+      request.onsuccess = function () {
+        resolve(request.result);
+      };
+      request.onerror = function () {
+        reject(request.error);
+      };
+    });
+  }
+
+  function idbTransactionDone(transaction) {
+    return new Promise(function (resolve, reject) {
+      transaction.oncomplete = function () {
+        resolve();
+      };
+      transaction.onerror = function () {
+        reject(transaction.error);
+      };
+      transaction.onabort = function () {
+        reject(transaction.error || new Error("Transaction aborted"));
+      };
+    });
+  }
+
+  function openDB() {
+    return new Promise(function (resolve, reject) {
+      var request = indexedDB.open(PERSISTENT_CACHE_DB_NAME, PERSISTENT_CACHE_DB_VERSION);
+      request.onupgradeneeded = function () {
+        var db = request.result;
+        if (!db.objectStoreNames.contains(PERSISTENT_CACHE_STORE_NAME)) {
+          db.createObjectStore(PERSISTENT_CACHE_STORE_NAME, { keyPath: "id" });
+        }
+      };
+      request.onsuccess = function () {
+        var db = request.result;
+        var forget = function () {
+          if (persistentCacheStore.db === db) persistentCacheStore.db = null;
+        };
+        db.onversionchange = function () {
+          db.close();
+          forget();
+        };
+        db.onclose = forget;
+        resolve(db);
+      };
+      request.onerror = function () {
+        reject(request.error);
+      };
+      request.onblocked = function () {
+        reject(new Error("IndexedDB open blocked by another tab"));
+      };
+    });
+  }
+
+  function getPersistentCacheDB() {
+    if (!persistentCacheStore.db) {
+      return openDB().then(function (db) {
+        persistentCacheStore.db = db;
+        return db;
+      });
+    }
+    return Promise.resolve(persistentCacheStore.db);
+  }
+
+  function mergeCacheEntries(stored, session) {
+    var isPlainObject = function (value) {
+      return !!value && typeof value === "object" && !Array.isArray(value);
+    };
+    if (!isPlainObject(stored)) return session;
+    if (!isPlainObject(session)) return stored;
+    return Object.assign({}, stored, session);
+  }
+
+  function initPersistentCache() {
+    if (persistentCacheStore.readyPromise) return persistentCacheStore.readyPromise;
+
+    persistentCacheStore.readyPromise = (function () {
+      var keys = Object.keys(PERSISTENT_CACHE_BINDINGS);
+      var stored = {};
+      var migrated = [];
+
+      return Promise.resolve()
+        .then(function () {
+          if (typeof indexedDB === "undefined") throw new Error("IndexedDB is not available");
+          return getPersistentCacheDB();
+        })
+        .then(function (db) {
+          var readStore = db.transaction(PERSISTENT_CACHE_STORE_NAME, "readonly").objectStore(PERSISTENT_CACHE_STORE_NAME);
+          return Promise.all(
+            keys.map(function (key) {
+              return idbRequest(readStore.get(key));
+            })
+          ).then(function (records) {
+            keys.forEach(function (key, i) {
+              if (records[i] !== undefined) {
+                stored[key] = records[i].value;
+                return;
+              }
+              var legacyValue = GM_getValue(key);
+              if (legacyValue !== undefined) {
+                stored[key] = legacyValue;
+                migrated.push(key);
+              }
+            });
+            if (!migrated.length) return null;
+            var transaction = db.transaction(PERSISTENT_CACHE_STORE_NAME, "readwrite");
+            var writeStore = transaction.objectStore(PERSISTENT_CACHE_STORE_NAME);
+            var now = Date.now();
+            migrated.forEach(function (key) {
+              writeStore.put({ id: key, value: stored[key], updatedAt: now });
+            });
+            return idbTransactionDone(transaction).then(function () {
+              migrated.forEach(function (key) {
+                GM_setValue(key, {});
+              });
+              logger("initPersistentCache()", "moved " + migrated.join(", ") + " from GM storage to IndexedDB");
+            });
+          });
+        })
+        .catch(function (err) {
+          logger("initPersistentCache()", "IndexedDB unavailable, falling back to GM storage", err);
+          persistentCacheStore.backend = "gm";
+          stored = {};
+          keys.forEach(function (key) {
+            stored[key] = GM_getValue(key);
+          });
+        })
+        .then(function () {
+          if (!persistentCacheStore.backend) persistentCacheStore.backend = "indexeddb";
+          keys.forEach(function (key) {
+            var field = PERSISTENT_CACHE_BINDINGS[key];
+            var session = state[field];
+            var hasSessionEntries = !!session && Object.keys(session).length > 0;
+            var merged = stored[key] === undefined ? session : mergeCacheEntries(stored[key], session);
+            state[field] = merged || {};
+            persistentCacheStore.values.set(key, state[field]);
+            if (hasSessionEntries) persistentCacheStore.pending.add(key);
+          });
+
+          window.addEventListener("pagehide", function () {
+            flushPersistentCache();
+          });
+          document.addEventListener("visibilitychange", function () {
+            if (document.visibilityState === "hidden") flushPersistentCache();
+          });
+          if (persistentCacheStore.pending.size > 0) schedulePersistentCacheFlush();
+          return persistentCacheStore.backend;
+        });
+    })();
+
+    return persistentCacheStore.readyPromise;
+  }
+
+  function setPersistentCache(key, value) {
+    persistentCacheStore.values.set(key, value);
+    persistentCacheStore.pending.add(key);
+    schedulePersistentCacheFlush();
+  }
+
+  function schedulePersistentCacheFlush() {
+    if (persistentCacheStore.flushTimer) return;
+    persistentCacheStore.flushTimer = setTimeout(function () {
+      persistentCacheStore.flushTimer = null;
+      flushPersistentCache();
+    }, PERSISTENT_CACHE_FLUSH_DELAY);
+  }
+
+  function flushPersistentCache() {
+    if (persistentCacheStore.flushTimer) {
+      clearTimeout(persistentCacheStore.flushTimer);
+      persistentCacheStore.flushTimer = null;
+    }
+    persistentCacheStore.flushChain = persistentCacheStore.flushChain.then(writePendingPersistentCache);
+    return persistentCacheStore.flushChain;
+  }
+
+  function writePendingPersistentCache() {
+    return initPersistentCache().then(function () {
+      if (persistentCacheStore.pending.size === 0) return true;
+      var batch = Array.from(persistentCacheStore.pending);
+      persistentCacheStore.pending.clear();
+      var write = Promise.resolve();
+      if (persistentCacheStore.backend === "indexeddb") {
+        write = getPersistentCacheDB().then(function (db) {
+          var transaction = db.transaction(PERSISTENT_CACHE_STORE_NAME, "readwrite");
+          var store = transaction.objectStore(PERSISTENT_CACHE_STORE_NAME);
+          var now = Date.now();
+          batch.forEach(function (key) {
+            store.put({ id: key, value: persistentCacheStore.values.get(key), updatedAt: now });
+          });
+          return idbTransactionDone(transaction);
+        });
+      } else {
+        batch.forEach(function (key) {
+          GM_setValue(key, persistentCacheStore.values.get(key));
+        });
+      }
+      return write
+        .then(function () {
+          return true;
+        })
+        .catch(function (err) {
+          persistentCacheStore.db = null;
+          batch.forEach(function (key) {
+            persistentCacheStore.pending.add(key);
+          });
+          logger("flushPersistentCache()", "write failed, key(s) queued again", err);
+          return false;
+        });
+    });
+  }
+
   function purgeCache() {
     var now = Date.now();
     var changed = false;
@@ -3784,34 +5213,54 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         changed = true;
       }
     });
-    if (changed) Store.set(IMAGE_CACHE_KEY, state.GL_imageCache);
+    mediaCache.forEach(function (entry, id) {
+      if (now - entry.ts > IMAGE_CACHE_MAX_AGE) mediaCache.delete(id);
+    });
+    if (changed) setPersistentCache(IMAGE_CACHE_KEY, state.GL_imageCache);
   }
 
   function putInCache(mediaId, url) {
     if (!mediaId || !url) return;
-    var keys = Object.keys(state.GL_imageCache);
-    if (keys.length >= IMAGE_MAX_CACHE_ITEMS) {
-      keys.sort(function (a, b) {
-        return (state.GL_imageCache[a].ts || 0) - (state.GL_imageCache[b].ts || 0);
-      });
-      delete state.GL_imageCache[keys[0]];
+    var entry = { url: url, ts: Date.now() };
+    var isNewPersistentEntry = !state.GL_imageCache[mediaId];
+
+    mediaCache.set(mediaId, entry);
+    if (mediaCache.size > IMAGE_MAX_CACHE_ITEMS) {
+      mediaCache.delete(mediaCache.keys().next().value);
     }
-    state.GL_imageCache[mediaId] = { url: url, ts: Date.now() };
-    clearTimeout(window.__imgCacheTimer);
-    window.__imgCacheTimer = setTimeout(function () {
-      Store.set(IMAGE_CACHE_KEY, state.GL_imageCache);
-    }, 800);
+
+    var keys = Object.keys(state.GL_imageCache);
+    if (isNewPersistentEntry && keys.length >= IMAGE_MAX_CACHE_ITEMS) {
+      var oldestId = keys[0];
+      var oldestTs = (state.GL_imageCache[oldestId] && state.GL_imageCache[oldestId].ts) || 0;
+      for (var i = 1; i < keys.length; i++) {
+        var ts = (state.GL_imageCache[keys[i]] && state.GL_imageCache[keys[i]].ts) || 0;
+        if (ts < oldestTs) {
+          oldestTs = ts;
+          oldestId = keys[i];
+        }
+      }
+      delete state.GL_imageCache[oldestId];
+      mediaCache.delete(oldestId);
+    }
+
+    state.GL_imageCache[mediaId] = entry;
+    setPersistentCache(IMAGE_CACHE_KEY, state.GL_imageCache);
   }
 
   function getImageFromCache(mediaId) {
     if (!mediaId) return null;
-    var e = state.GL_imageCache[mediaId];
-    if (!e) return null;
-    if (Date.now() - (e.ts || 0) > IMAGE_CACHE_MAX_AGE) {
-      delete state.GL_imageCache[mediaId];
+    var entry = mediaCache.get(mediaId) || state.GL_imageCache[mediaId];
+    if (!entry) return null;
+    if (Date.now() - (entry.ts || 0) > IMAGE_CACHE_MAX_AGE) {
+      mediaCache.delete(mediaId);
+      if (state.GL_imageCache[mediaId]) {
+        delete state.GL_imageCache[mediaId];
+        setPersistentCache(IMAGE_CACHE_KEY, state.GL_imageCache);
+      }
       return null;
     }
-    return e.url || null;
+    return entry.url || null;
   }
 
   function registerPerformanceObserver() {
@@ -3826,7 +5275,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           if (u.indexOf("_e35_s") > -1) return;
           if (/_[sp](\d+)x\1(?!\d)/.test(u)) return;
           var id = decodeMediaIdFromUrl(u);
-          if (id && !state.GL_imageCache[id]) putInCache(id, u);
+          if (id && !mediaCache.has(id)) putInCache(id, u);
         });
       });
       perfObs.observe({ entryTypes: ["resource"] });
@@ -3870,6 +5319,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       ["Shift + ?", "Show / hide this overlay"],
       [getPlatformModifierKey() + " + W", "Settings"],
       [getPlatformModifierKey() + " + S", "Download story"],
+      [getPlatformModifierKey() + " + T", "Show tagged profiles"],
       [getPlatformModifierKey() + " + Z", "Debug window"],
       [getPlatformModifierKey() + " + R", "Reload " + NAME],
       [getPlatformModifierKey() + " + Q", "Close dialogs"],
@@ -3920,12 +5370,14 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   function toggleCommandPalette() {
     var existing = document.querySelector(".ignis-palette");
     if (existing) {
+      $(document).off("keydown.igpal");
       existing.remove();
       return;
     }
     var actions = [
       { label: "Open Settings", kw: "settings preferences options", fn: function () { showSetting(); } },
       { label: "Download Statistics", kw: "stats usage numbers", fn: function () { showSetting("stats"); } },
+      { label: "Filename Template", kw: "rename file name format template", fn: openRenameEditor },
       { label: "About " + NAME, kw: "about version info", fn: showAbout },
       { label: "Debug Window", kw: "debug logs console", fn: showDebugDOM },
       { label: "Download Focused Post", kw: "save post quick download", fn: quickDownloadFocusedPost },
@@ -3938,6 +5390,15 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         },
       },
       { label: "Download All Stories", kw: "save story all batch", fn: function () { downloadStoriesAll("stories"); } },
+      {
+        label: "Show Tagged Profiles",
+        kw: "story highlight mentions tagged profiles",
+        fn: function () {
+          if (state.route === "story") showTaggedProfiles("stories");
+          else if (state.route === "highlights") showTaggedProfiles("highlights");
+          else Toasts.info("Open a story or highlight first.");
+        },
+      },
       { label: "Keyboard Shortcuts", kw: "shortcuts help keys overlay", fn: toggleShortcutsHelp },
       { label: "Close Dialogs", kw: "close modals dismiss", fn: function () { ModalStack.closeTop(); } },
       { label: "Reload " + NAME, kw: "reload restart refresh", fn: reloadScript },
@@ -4052,6 +5513,11 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       } else if (code === 75) {
         e.preventDefault();
         toggleCommandPalette();
+      } else if (code === 84) {
+        e.preventDefault();
+        if (state.route === "story") showTaggedProfiles("stories");
+        else if (state.route === "highlights") showTaggedProfiles("highlights");
+        else Toasts.info("Open a story or highlight first.");
       } else if (code === 82) {
         e.preventDefault();
         reloadScript();
@@ -4071,7 +5537,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     state.postPoll = null;
     $body.off(".ignisEvents");
     state.bodyEventsRegistered = false;
-    $(".ignis-bar, .ignis-sb, .ignis-sb-pos, .ignis-pd, .ignis-ksh, .ignis-palette, .ignis-gd").remove();
+    $(".ignis-bar, .ignis-storytools, .ignis-sb, .ignis-sb-pos, .ignis-pd, .ignis-ksh, .ignis-palette, .ignis-gd").remove();
     $(".ignis-modal").remove();
     $("[data-snig]").removeAttr("data-snig");
     state.pageLoaded = false;
@@ -4108,6 +5574,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       }
     }
     add("Settings", "w", showSetting);
+    add("Filename Template", "t", openRenameEditor);
     add("Hotkey Settings", "q", showHotkeySetting);
     add("Command Palette", "k", toggleCommandPalette);
     add("About " + NAME, "i", showAbout);
@@ -4118,7 +5585,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   function ignisBoot() {
     $body = $("body");
     initSettings();
-    purgeCache();
+    initPersistentCache().then(purgeCache);
     Stats.session();
     registerMenuCommand();
     registerBodyHandlers();

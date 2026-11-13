@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name               IGNIS — Instagram Enhancement Suite
-// @version            9.6.0
-// @description        IGNIS v9.6: instant high-quality downloads (posts, reels, stories, highlights, HD avatars, DASH video+audio MP4 mux via Mediabunny, captions, EXIF) plus local download statistics and a command palette (Ctrl+K).
+// @version            10.0.0
+// @description        IGNIS v10: high-quality downloads (posts, reels, stories, highlights, HD avatars, DASH video+audio MP4 mux, captions, EXIF), tagged-profile lookup, IndexedDB caches, local statistics, and a rebuilt interface.
 // @author             IGNIS
 // @match              https://*.instagram.com/*
 // @downloadURL        https://github.com/mheci/Ignis/releases/latest/download/ignis.user.js
@@ -34,9 +34,10 @@
      Ignis Lens    : media detection & extraction
      Ignis Forge   : download engine (blob, EXIF, DASH, captions)
      Ignis Render  : UI (download dialog, dashboard, viewer, toasts)
+     Ignis Pulse   : page injection, story tools, router
      ============================================================ */
 
-  const VERSION = "9.6.0";
+  const VERSION = "10.0.0";
   const NAME = "IGNIS";
   const $ = jQuery;
 
@@ -100,17 +101,18 @@
     ["FORCE_RESOURCE_VIA_MEDIA", "download", "Fetch via Media API", "Fetches resources via the Media API for the highest quality.", true],
     ["PREFER_DASH_MANIFEST", "download", "Prefer DASH Manifest", "Downloads separate highest-quality video + audio DASH streams and merges them.", true],
     ["FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED", "download", "Fallback if API Throttled", "Falls back to direct links when the Media API is rate-limited.", true],
-    ["NEW_TAB_ALWAYS_FORCE_MEDIA_IN_POST", "download", "Always Use Media API for New Tab", "Always resolves items via the Media API when opening a new tab.", false],
-    ["FORCE_FETCH_ALL_RESOURCES", "download", "Force Fetch All Resources", "Always loads the full post payload from the API for dialogs.", false],
     ["MODIFY_RESOURCE_EXIF", "download", "Add EXIF Metadata", "Adds post URL, date and author to image EXIF.", true],
     ["DOWNLOAD_WITH_CAPTION", "download", "Download with Caption (.txt)", "Also saves the post caption as a .txt file alongside the media.", false],
     ["DIRECT_DOWNLOAD_ALL", "download", "Direct Download All", "Downloads every item of a post immediately, without a dialog.", false],
-    ["DIRECT_DOWNLOAD_STORY", "download", "Direct Download Story", "Downloads all story items immediately, without a dialog.", false],
+    ["DIRECT_DOWNLOAD_STORY", "download", "Direct Download Story", "Downloading a story saves every item immediately, without a dialog.", false],
     ["DIRECT_DOWNLOAD_VISIBLE_RESOURCE", "download", "Download Visible Resource", "Directly downloads only the currently visible carousel item.", false],
-    ["DOWNLOAD_CAROUSEL_ALL", "download", "Download All Carousel Items", "Downloading a carousel post always fetches every item.", false],
     ["DOWNLOAD_STORY_HIGHLIGHTS", "download", "Download Story Highlights", "Story 'Download All' also includes the user's highlights.", false],
+    ["MATCH_VIDEO_FILENAME_TO_THUMBNAIL", "download", "Match Video Name to Thumbnail", "Names video downloads after their thumbnail file instead of the rename template.", false],
+    ["NEW_TAB_HIGHEST_VIDEO", "download", "New Tab Uses Highest Video", "Opens the highest-quality video-only DASH stream in a new tab, without audio.", false],
     ["DOWNLOAD_PROFILE_PIC_HD", "download", "Download HD Profile Pic", "Requests the highest-resolution profile picture available.", true],
     ["USE_EXTERNAL_DOWNLOAD_MODE", "download", "Use External Download Mode", "Downloads via the browser download manager (GM_download) instead of in-memory blobs — best for large videos.", false],
+    ["SKIP_VIEW_STORY_CONFIRM", "download", "Skip View Story Confirmation", "Clicks the confirmation button when Instagram asks whether to view a story.", false],
+    ["SKIP_SHARED_WITH_YOU_DIALOG", "download", "Skip Shared-With-You Dialog", "Closes the 'shared this with you' dialog on ?igsh= links.", false],
     ["KEYBOARD_DOWNLOAD_S", "keyboard", "S Download", "S downloads the focused post.", true],
     ["KEYBOARD_SHORTCUTS_HELP", "keyboard", "Keyboard Shortcuts Help", "Shift+? shows the shortcuts overlay.", true],
     ["COMMAND_PALETTE", "keyboard", "Command Palette", "Ctrl+K (Cmd+K on Mac, Alt+K anywhere) opens the quick command palette.", true],
@@ -134,16 +136,34 @@
     AUTO_RENAME: ["RENAME_PUBLISH_DATE"],
     FORCE_RESOURCE_VIA_MEDIA: [
       "FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED",
-      "NEW_TAB_ALWAYS_FORCE_MEDIA_IN_POST",
       "PREFER_DASH_MANIFEST",
     ],
+    PREFER_DASH_MANIFEST: ["NEW_TAB_HIGHEST_VIDEO"],
   };
 
   const FALLBACK_APP_ID = "936619743392459";
   const IMAGE_CACHE_KEY = "URLS_OF_IMAGES_TEMPORARILY_STORED";
   const IMAGE_CACHE_MAX_AGE = 12 * 60 * 60 * 1000;
-  const IMAGE_MAX_CACHE_ITEMS = 300;
+  const IMAGE_MAX_CACHE_ITEMS = 500;
   const checkInterval = 250;
+
+  const USER_ID_CACHE_KEY = "USER_IDS_STORED";
+  const USER_ID_MAX_CACHE_ITEMS = 1000;
+  const POST_CACHE_MAX_ITEMS = 30;
+  const POST_CACHE_MAX_AGE = 10 * 60 * 1000;
+
+  // Persistent caches live in IndexedDB (see part6). Settings stay in GM storage.
+  const PERSISTENT_CACHE_DB_NAME = "IGNIS";
+  const PERSISTENT_CACHE_DB_VERSION = 1;
+  const PERSISTENT_CACHE_STORE_NAME = "DATA_CACHE";
+  const PERSISTENT_CACHE_FLUSH_DELAY = 500;
+  // Cache key -> `state` field holding its in-memory copy.
+  const PERSISTENT_CACHE_BINDINGS = {
+    [IMAGE_CACHE_KEY]: "GL_imageCache",
+    [USER_ID_CACHE_KEY]: "GL_userIdCache",
+  };
+
+  const HASTE_BITMAP_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
 
   const SVG = {
     DOWNLOAD: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>',
@@ -152,12 +172,28 @@
     DOWNLOAD_ALL: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/></svg>',
     CLOSE: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
     TEXT: '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>',
+    TAGGED_PROFILES: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></svg>',
+    LIST: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>',
+    SPARK: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="m5.6 5.6 2.1 2.1"/><path d="m16.3 16.3 2.1 2.1"/><path d="m18.4 5.6-2.1 2.1"/><path d="m7.7 16.3-2.1 2.1"/></svg>',
   };
 
   const resourceCountSelector =
     "*:not([data-pagelet])>*:not([role]):not([data-pagelet])>*>*>*[role]>*>ul[class] li[class]";
   const userIdCache = new Map();
+  // Session-only hot cache for media discovered during the current page session.
+  const mediaCache = new Map();
   let $body = $("body");
+
+  // Runtime state of the IndexedDB cache manager (see part6).
+  const persistentCacheStore = {
+    backend: null,
+    db: null,
+    readyPromise: null,
+    values: new Map(),
+    pending: new Set(),
+    flushTimer: null,
+    flushChain: Promise.resolve(true),
+  };
 
   // ─── State ─────────────────────────────────────────────────────────────
   const state = {
@@ -172,9 +208,11 @@
     GL_repeat: null,
     postPoll: null,
     homepageObserverDebounce: null,
-    GL_dataCache: { stories: {}, highlights: {} },
+    GL_storyConfirmSkipped: false,
+    GL_dataCache: { stories: {}, highlights: {}, posts: {}, taggedProfiles: {} },
     GL_payloadCache: {},
     GL_imageCache: {},
+    GL_userIdCache: {},
     GL_mediaDataCache: {},
     busy: 0,
     _igTab: "download",
@@ -371,7 +409,7 @@
     if (u) return u;
 
     var parts = location.pathname.split("/").filter(Boolean);
-    if (parts[0] === "stories" && parts.length >= 2 && !/^\d+$/.test(parts[1])) {
+    if (parts[0] === "stories" && parts.length >= 2 && parts[1] !== "highlights" && !/^\d+$/.test(parts[1])) {
       return cleanName(parts[1]);
     }
     return null;
@@ -648,4 +686,6 @@
       if (typeof v === "number") state[pair[1]] = v;
     });
     state.GL_imageCache = Store.loadImageCache();
+    var cachedIds = Store.get(USER_ID_CACHE_KEY, null);
+    state.GL_userIdCache = cachedIds && typeof cachedIds === "object" && !Array.isArray(cachedIds) ? cachedIds : {};
   }

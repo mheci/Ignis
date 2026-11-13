@@ -165,6 +165,19 @@
     var timestamp = normTs(metadata.timestamp);
     var index = metadata.index != null ? metadata.index : 0;
     var date = new Date(timestamp * 1000);
+    var filetype = metadata.filetype || "jpg";
+
+    // Optional: name a video after its thumbnail file, matching the two
+    // files when they sit side by side in a download folder.
+    if (USER_SETTING.MATCH_VIDEO_FILENAME_TO_THUMBNAIL && (filetype === "mp4" || filetype === "m4a") && metadata.thumbnailURL) {
+      try {
+        var thumbBase = new URL(metadata.thumbnailURL).pathname.split("/").pop().split(".").slice(0, -1).join(".");
+        if (thumbBase) return sanitizeFilename((metadata.username || "instagram") + "_" + thumbBase) + "." + filetype;
+      } catch (e) {
+        /* fall through to the template */
+      }
+    }
+
     var original_name = "";
     try {
       original_name = decodeURIComponent(
@@ -201,7 +214,7 @@
         (metadata.username || "instagram") + "_" + (original_name || "media") + "_" + (metadata.shortcode || "")
       );
     }
-    return filename + "." + (metadata.filetype || "jpg");
+    return filename + "." + filetype;
   }
 
   async function createSaveFileElement(downloadLink, object, metadata) {
@@ -308,8 +321,9 @@
   function buildExifPayload(metadata) {
     var dateBytes = enc(formatExifDate(metadata.timestamp) + "\0");
     var artistBytes = enc((metadata.username || "") + "\0");
+    var exifIndex = metadata.index != null && metadata.index > 0 ? metadata.index : 1;
     var keywordBytes = encUtf16le(
-      "https://www.instagram.com/p/" + (metadata.shortcode || "") + "/\0"
+      "https://www.instagram.com/p/" + (metadata.shortcode || "") + "/?img_index=" + exifIndex + "\0"
     );
     var xpCommentBytes = encUtf16le(
       "https://www.instagram.com/uid/" + (metadata.uid || "unknown") + "\0"
@@ -594,9 +608,8 @@
   }
 
   async function downloadDashStreams(videoUrl, audioUrl, meta) {
-    var vBuf = await fetchArrayBuffer(videoUrl);
-    var aBuf = await fetchArrayBuffer(audioUrl);
-    var mergedBuf = await muxDashVideoAudioToMp4(vBuf, aBuf);
+    var buffers = await Promise.all([fetchArrayBuffer(videoUrl), fetchArrayBuffer(audioUrl)]);
+    var mergedBuf = await muxDashVideoAudioToMp4(buffers[0], buffers[1]);
     var merged = new Blob([mergedBuf], { type: "video/mp4" });
     await createSaveFileElement(videoUrl, merged, meta);
   }
@@ -604,20 +617,32 @@
   async function tryDashDownload(mediaItem, meta, isPreview) {
     try {
       if (!USER_SETTING.PREFER_DASH_MANIFEST || !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA) return false;
-      if (!mediaItem || !mediaItem.video_dash_manifest || !mediaItem.video_versions) return false;
+      if (!mediaItem || !mediaItem.video_dash_manifest) return false;
       var best = parseDashManifest(mediaItem.video_dash_manifest);
       var vUrl = best && best.video ? best.video.url : "";
       if (!vUrl) return false;
       var aUrl = best && best.audio ? best.audio.url : "";
+      var progressiveUrl = mediaItem.video_versions && mediaItem.video_versions[0] && mediaItem.video_versions[0].url;
+      var thumbnailURL =
+        (mediaItem.image_versions2 && mediaItem.image_versions2.candidates && mediaItem.image_versions2.candidates[0] &&
+          mediaItem.image_versions2.candidates[0].url) ||
+        (mediaItem.display_resources && mediaItem.display_resources[0] && mediaItem.display_resources[0].src) ||
+        mediaItem.display_url ||
+        meta.thumbnailURL;
+      var dashMeta = Object.assign({}, meta, { thumbnailURL: thumbnailURL });
       if (isPreview) {
-        openNewTab(vUrl);
+        if (USER_SETTING.NEW_TAB_HIGHEST_VIDEO) {
+          openNewTab(vUrl);
+        } else {
+          openNewTab(progressiveUrl || vUrl);
+        }
         return true;
       }
       if (!aUrl) {
-        await saveFiles(vUrl, meta);
+        await saveFiles(vUrl, Object.assign({}, dashMeta, { filetype: "mp4" }));
         return true;
       }
-      await downloadDashStreams(vUrl, aUrl, meta);
+      await downloadDashStreams(vUrl, aUrl, dashMeta);
       return true;
     } catch (e) {
       logger("[DASH]", "mux failed, using single-file fallback:", e && e.message ? e.message : e);
@@ -629,8 +654,8 @@
   async function downloadResource(item, meta, opts) {
     opts = opts || {};
     var dashCandidate = item.dash || state.GL_mediaDataCache[item.id] || null;
-    if (dashCandidate && !opts.preview) {
-      var okDash = await tryDashDownload(dashCandidate, meta, false);
+    if (dashCandidate && (!opts.preview || USER_SETTING.NEW_TAB_HIGHEST_VIDEO)) {
+      var okDash = await tryDashDownload(dashCandidate, meta, !!opts.preview);
       if (okDash) return true;
     }
     if (!opts.preview && !item.isVideo && item.id && USER_SETTING.CAPTURE_IMAGE_VIA_MEDIA_CACHE) {
@@ -663,6 +688,7 @@
       caption: item.caption || meta.caption,
       index: meta.index != null ? meta.index : 0,
       filetype: item.ext || meta.filetype || (item.isVideo ? "mp4" : "jpg"),
+      thumbnailURL: item.thumb || meta.thumbnailURL,
     });
     return await saveFiles(item.url, finalMeta);
   }
@@ -674,7 +700,14 @@
     Progress.set(0, total);
     for (var i = 0; i < total; i++) {
       try {
-        await downloadResource(items[i], Object.assign({}, meta, { index: i + 1 }), {});
+        var itemMeta = Object.assign({}, meta, { index: items[i]._igSourceIndex || i + 1 });
+        if (items[i].takenAt && USER_SETTING.RENAME_PUBLISH_DATE) {
+          itemMeta.timestamp = items[i].takenAt;
+        }
+        if ((meta.sourceType === "stories" || meta.sourceType === "highlights") && items[i].id) {
+          itemMeta.shortcode = items[i].id;
+        }
+        await downloadResource(items[i], itemMeta, {});
       } catch (e) {
         logger("batch item failed:", e && e.message ? e.message : e);
       }

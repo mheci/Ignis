@@ -2,6 +2,220 @@
      Ignis Boot — cache, keyboard, menu, startup
      ============================================================ */
 
+  // ─── Persistent cache (IndexedDB, GM-storage fallback) ─────────────────
+  function idbRequest(request) {
+    return new Promise(function (resolve, reject) {
+      request.onsuccess = function () {
+        resolve(request.result);
+      };
+      request.onerror = function () {
+        reject(request.error);
+      };
+    });
+  }
+
+  function idbTransactionDone(transaction) {
+    return new Promise(function (resolve, reject) {
+      transaction.oncomplete = function () {
+        resolve();
+      };
+      transaction.onerror = function () {
+        reject(transaction.error);
+      };
+      transaction.onabort = function () {
+        reject(transaction.error || new Error("Transaction aborted"));
+      };
+    });
+  }
+
+  function openDB() {
+    return new Promise(function (resolve, reject) {
+      var request = indexedDB.open(PERSISTENT_CACHE_DB_NAME, PERSISTENT_CACHE_DB_VERSION);
+      request.onupgradeneeded = function () {
+        var db = request.result;
+        if (!db.objectStoreNames.contains(PERSISTENT_CACHE_STORE_NAME)) {
+          db.createObjectStore(PERSISTENT_CACHE_STORE_NAME, { keyPath: "id" });
+        }
+      };
+      request.onsuccess = function () {
+        var db = request.result;
+        var forget = function () {
+          if (persistentCacheStore.db === db) persistentCacheStore.db = null;
+        };
+        db.onversionchange = function () {
+          db.close();
+          forget();
+        };
+        db.onclose = forget;
+        resolve(db);
+      };
+      request.onerror = function () {
+        reject(request.error);
+      };
+      request.onblocked = function () {
+        reject(new Error("IndexedDB open blocked by another tab"));
+      };
+    });
+  }
+
+  function getPersistentCacheDB() {
+    if (!persistentCacheStore.db) {
+      return openDB().then(function (db) {
+        persistentCacheStore.db = db;
+        return db;
+      });
+    }
+    return Promise.resolve(persistentCacheStore.db);
+  }
+
+  function mergeCacheEntries(stored, session) {
+    var isPlainObject = function (value) {
+      return !!value && typeof value === "object" && !Array.isArray(value);
+    };
+    if (!isPlainObject(stored)) return session;
+    if (!isPlainObject(session)) return stored;
+    return Object.assign({}, stored, session);
+  }
+
+  function initPersistentCache() {
+    if (persistentCacheStore.readyPromise) return persistentCacheStore.readyPromise;
+
+    persistentCacheStore.readyPromise = (function () {
+      var keys = Object.keys(PERSISTENT_CACHE_BINDINGS);
+      var stored = {};
+      var migrated = [];
+
+      return Promise.resolve()
+        .then(function () {
+          if (typeof indexedDB === "undefined") throw new Error("IndexedDB is not available");
+          return getPersistentCacheDB();
+        })
+        .then(function (db) {
+          var readStore = db.transaction(PERSISTENT_CACHE_STORE_NAME, "readonly").objectStore(PERSISTENT_CACHE_STORE_NAME);
+          return Promise.all(
+            keys.map(function (key) {
+              return idbRequest(readStore.get(key));
+            })
+          ).then(function (records) {
+            keys.forEach(function (key, i) {
+              if (records[i] !== undefined) {
+                stored[key] = records[i].value;
+                return;
+              }
+              var legacyValue = GM_getValue(key);
+              if (legacyValue !== undefined) {
+                stored[key] = legacyValue;
+                migrated.push(key);
+              }
+            });
+            if (!migrated.length) return null;
+            var transaction = db.transaction(PERSISTENT_CACHE_STORE_NAME, "readwrite");
+            var writeStore = transaction.objectStore(PERSISTENT_CACHE_STORE_NAME);
+            var now = Date.now();
+            migrated.forEach(function (key) {
+              writeStore.put({ id: key, value: stored[key], updatedAt: now });
+            });
+            return idbTransactionDone(transaction).then(function () {
+              migrated.forEach(function (key) {
+                GM_setValue(key, {});
+              });
+              logger("initPersistentCache()", "moved " + migrated.join(", ") + " from GM storage to IndexedDB");
+            });
+          });
+        })
+        .catch(function (err) {
+          logger("initPersistentCache()", "IndexedDB unavailable, falling back to GM storage", err);
+          persistentCacheStore.backend = "gm";
+          stored = {};
+          keys.forEach(function (key) {
+            stored[key] = GM_getValue(key);
+          });
+        })
+        .then(function () {
+          if (!persistentCacheStore.backend) persistentCacheStore.backend = "indexeddb";
+          keys.forEach(function (key) {
+            var field = PERSISTENT_CACHE_BINDINGS[key];
+            var session = state[field];
+            var hasSessionEntries = !!session && Object.keys(session).length > 0;
+            var merged = stored[key] === undefined ? session : mergeCacheEntries(stored[key], session);
+            state[field] = merged || {};
+            persistentCacheStore.values.set(key, state[field]);
+            if (hasSessionEntries) persistentCacheStore.pending.add(key);
+          });
+
+          window.addEventListener("pagehide", function () {
+            flushPersistentCache();
+          });
+          document.addEventListener("visibilitychange", function () {
+            if (document.visibilityState === "hidden") flushPersistentCache();
+          });
+          if (persistentCacheStore.pending.size > 0) schedulePersistentCacheFlush();
+          return persistentCacheStore.backend;
+        });
+    })();
+
+    return persistentCacheStore.readyPromise;
+  }
+
+  function setPersistentCache(key, value) {
+    persistentCacheStore.values.set(key, value);
+    persistentCacheStore.pending.add(key);
+    schedulePersistentCacheFlush();
+  }
+
+  function schedulePersistentCacheFlush() {
+    if (persistentCacheStore.flushTimer) return;
+    persistentCacheStore.flushTimer = setTimeout(function () {
+      persistentCacheStore.flushTimer = null;
+      flushPersistentCache();
+    }, PERSISTENT_CACHE_FLUSH_DELAY);
+  }
+
+  function flushPersistentCache() {
+    if (persistentCacheStore.flushTimer) {
+      clearTimeout(persistentCacheStore.flushTimer);
+      persistentCacheStore.flushTimer = null;
+    }
+    persistentCacheStore.flushChain = persistentCacheStore.flushChain.then(writePendingPersistentCache);
+    return persistentCacheStore.flushChain;
+  }
+
+  function writePendingPersistentCache() {
+    return initPersistentCache().then(function () {
+      if (persistentCacheStore.pending.size === 0) return true;
+      var batch = Array.from(persistentCacheStore.pending);
+      persistentCacheStore.pending.clear();
+      var write = Promise.resolve();
+      if (persistentCacheStore.backend === "indexeddb") {
+        write = getPersistentCacheDB().then(function (db) {
+          var transaction = db.transaction(PERSISTENT_CACHE_STORE_NAME, "readwrite");
+          var store = transaction.objectStore(PERSISTENT_CACHE_STORE_NAME);
+          var now = Date.now();
+          batch.forEach(function (key) {
+            store.put({ id: key, value: persistentCacheStore.values.get(key), updatedAt: now });
+          });
+          return idbTransactionDone(transaction);
+        });
+      } else {
+        batch.forEach(function (key) {
+          GM_setValue(key, persistentCacheStore.values.get(key));
+        });
+      }
+      return write
+        .then(function () {
+          return true;
+        })
+        .catch(function (err) {
+          persistentCacheStore.db = null;
+          batch.forEach(function (key) {
+            persistentCacheStore.pending.add(key);
+          });
+          logger("flushPersistentCache()", "write failed, key(s) queued again", err);
+          return false;
+        });
+    });
+  }
+
   // ─── Cache subsystem ───────────────────────────────────────────────────
   function purgeCache() {
     var now = Date.now();
@@ -13,34 +227,54 @@
         changed = true;
       }
     });
-    if (changed) Store.set(IMAGE_CACHE_KEY, state.GL_imageCache);
+    mediaCache.forEach(function (entry, id) {
+      if (now - entry.ts > IMAGE_CACHE_MAX_AGE) mediaCache.delete(id);
+    });
+    if (changed) setPersistentCache(IMAGE_CACHE_KEY, state.GL_imageCache);
   }
 
   function putInCache(mediaId, url) {
     if (!mediaId || !url) return;
-    var keys = Object.keys(state.GL_imageCache);
-    if (keys.length >= IMAGE_MAX_CACHE_ITEMS) {
-      keys.sort(function (a, b) {
-        return (state.GL_imageCache[a].ts || 0) - (state.GL_imageCache[b].ts || 0);
-      });
-      delete state.GL_imageCache[keys[0]];
+    var entry = { url: url, ts: Date.now() };
+    var isNewPersistentEntry = !state.GL_imageCache[mediaId];
+
+    mediaCache.set(mediaId, entry);
+    if (mediaCache.size > IMAGE_MAX_CACHE_ITEMS) {
+      mediaCache.delete(mediaCache.keys().next().value);
     }
-    state.GL_imageCache[mediaId] = { url: url, ts: Date.now() };
-    clearTimeout(window.__imgCacheTimer);
-    window.__imgCacheTimer = setTimeout(function () {
-      Store.set(IMAGE_CACHE_KEY, state.GL_imageCache);
-    }, 800);
+
+    var keys = Object.keys(state.GL_imageCache);
+    if (isNewPersistentEntry && keys.length >= IMAGE_MAX_CACHE_ITEMS) {
+      var oldestId = keys[0];
+      var oldestTs = (state.GL_imageCache[oldestId] && state.GL_imageCache[oldestId].ts) || 0;
+      for (var i = 1; i < keys.length; i++) {
+        var ts = (state.GL_imageCache[keys[i]] && state.GL_imageCache[keys[i]].ts) || 0;
+        if (ts < oldestTs) {
+          oldestTs = ts;
+          oldestId = keys[i];
+        }
+      }
+      delete state.GL_imageCache[oldestId];
+      mediaCache.delete(oldestId);
+    }
+
+    state.GL_imageCache[mediaId] = entry;
+    setPersistentCache(IMAGE_CACHE_KEY, state.GL_imageCache);
   }
 
   function getImageFromCache(mediaId) {
     if (!mediaId) return null;
-    var e = state.GL_imageCache[mediaId];
-    if (!e) return null;
-    if (Date.now() - (e.ts || 0) > IMAGE_CACHE_MAX_AGE) {
-      delete state.GL_imageCache[mediaId];
+    var entry = mediaCache.get(mediaId) || state.GL_imageCache[mediaId];
+    if (!entry) return null;
+    if (Date.now() - (entry.ts || 0) > IMAGE_CACHE_MAX_AGE) {
+      mediaCache.delete(mediaId);
+      if (state.GL_imageCache[mediaId]) {
+        delete state.GL_imageCache[mediaId];
+        setPersistentCache(IMAGE_CACHE_KEY, state.GL_imageCache);
+      }
       return null;
     }
-    return e.url || null;
+    return entry.url || null;
   }
 
   function registerPerformanceObserver() {
@@ -55,7 +289,7 @@
           if (u.indexOf("_e35_s") > -1) return;
           if (/_[sp](\d+)x\1(?!\d)/.test(u)) return;
           var id = decodeMediaIdFromUrl(u);
-          if (id && !state.GL_imageCache[id]) putInCache(id, u);
+          if (id && !mediaCache.has(id)) putInCache(id, u);
         });
       });
       perfObs.observe({ entryTypes: ["resource"] });
@@ -100,6 +334,7 @@
       ["Shift + ?", "Show / hide this overlay"],
       [getPlatformModifierKey() + " + W", "Settings"],
       [getPlatformModifierKey() + " + S", "Download story"],
+      [getPlatformModifierKey() + " + T", "Show tagged profiles"],
       [getPlatformModifierKey() + " + Z", "Debug window"],
       [getPlatformModifierKey() + " + R", "Reload " + NAME],
       [getPlatformModifierKey() + " + Q", "Close dialogs"],
@@ -151,12 +386,14 @@
   function toggleCommandPalette() {
     var existing = document.querySelector(".ignis-palette");
     if (existing) {
+      $(document).off("keydown.igpal");
       existing.remove();
       return;
     }
     var actions = [
       { label: "Open Settings", kw: "settings preferences options", fn: function () { showSetting(); } },
       { label: "Download Statistics", kw: "stats usage numbers", fn: function () { showSetting("stats"); } },
+      { label: "Filename Template", kw: "rename file name format template", fn: openRenameEditor },
       { label: "About " + NAME, kw: "about version info", fn: showAbout },
       { label: "Debug Window", kw: "debug logs console", fn: showDebugDOM },
       { label: "Download Focused Post", kw: "save post quick download", fn: quickDownloadFocusedPost },
@@ -169,6 +406,15 @@
         },
       },
       { label: "Download All Stories", kw: "save story all batch", fn: function () { downloadStoriesAll("stories"); } },
+      {
+        label: "Show Tagged Profiles",
+        kw: "story highlight mentions tagged profiles",
+        fn: function () {
+          if (state.route === "story") showTaggedProfiles("stories");
+          else if (state.route === "highlights") showTaggedProfiles("highlights");
+          else Toasts.info("Open a story or highlight first.");
+        },
+      },
       { label: "Keyboard Shortcuts", kw: "shortcuts help keys overlay", fn: toggleShortcutsHelp },
       { label: "Close Dialogs", kw: "close modals dismiss", fn: function () { ModalStack.closeTop(); } },
       { label: "Reload " + NAME, kw: "reload restart refresh", fn: reloadScript },
@@ -284,6 +530,11 @@
       } else if (code === 75) {
         e.preventDefault();
         toggleCommandPalette();
+      } else if (code === 84) {
+        e.preventDefault();
+        if (state.route === "story") showTaggedProfiles("stories");
+        else if (state.route === "highlights") showTaggedProfiles("highlights");
+        else Toasts.info("Open a story or highlight first.");
       } else if (code === 82) {
         e.preventDefault();
         reloadScript();
@@ -304,7 +555,7 @@
     state.postPoll = null;
     $body.off(".ignisEvents");
     state.bodyEventsRegistered = false;
-    $(".ignis-bar, .ignis-sb, .ignis-sb-pos, .ignis-pd, .ignis-ksh, .ignis-palette, .ignis-gd").remove();
+    $(".ignis-bar, .ignis-storytools, .ignis-sb, .ignis-sb-pos, .ignis-pd, .ignis-ksh, .ignis-palette, .ignis-gd").remove();
     $(".ignis-modal").remove();
     $("[data-snig]").removeAttr("data-snig");
     state.pageLoaded = false;
@@ -341,6 +592,7 @@
       }
     }
     add("Settings", "w", showSetting);
+    add("Filename Template", "t", openRenameEditor);
     add("Hotkey Settings", "q", showHotkeySetting);
     add("Command Palette", "k", toggleCommandPalette);
     add("About " + NAME, "i", showAbout);
@@ -352,7 +604,7 @@
   function ignisBoot() {
     $body = $("body");
     initSettings();
-    purgeCache();
+    initPersistentCache().then(purgeCache);
     Stats.session();
     registerMenuCommand();
     registerBodyHandlers();

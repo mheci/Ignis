@@ -3,31 +3,141 @@
      ============================================================ */
 
   // ─── Carousel visible-index detection ──────────────────────────────────
-  function getVisibleNodeIndex($main) {
-    if (!$main || !$main.length) return 0;
-    var hasBackButton = $main.find("button._afxv._al46._al47").length > 0;
-    if (!hasBackButton) return 0;
-    var $viewport = $main
-      .find("*:not([data-pagelet])>*:not([role]):not([data-pagelet])>*>*>*[role]>*>ul[class]")
-      .parent()
-      .parent("[role]");
-    var viewportRect = $viewport[0] ? $viewport[0].getBoundingClientRect() : null;
-    if (!viewportRect || !viewportRect.width) return 0;
-    var best = null;
-    var bestDist = Infinity;
-    $main.find("li[class]").each(function () {
-      var rect = this.getBoundingClientRect();
-      if (!rect.width) return;
-      var dist = Math.abs(rect.right - viewportRect.right);
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = this;
+  function tagCarouselSlides($ul) {
+    if (!$ul || !$ul.length) return;
+    var $slides = $ul.children("li").filter(function () {
+      var w = this.getBoundingClientRect().width;
+      return w > 64 && ($(this).find("img, video").length > 0 || $(this).attr("class"));
+    });
+    if (!$slides.length) return;
+
+    var slideWidth = 0;
+    $slides.each(function () {
+      var w = this.getBoundingClientRect().width;
+      if (w > 64 && !slideWidth) slideWidth = w;
+    });
+    if (!slideWidth) {
+      $slides.each(function () {
+        var m = ($(this).children("div").first().attr("style") || "").match(/width:\s*(\d+(?:\.\d+)?)px/);
+        if (m && !slideWidth) slideWidth = parseFloat(m[1]);
+      });
+    }
+    if (!slideWidth) {
+      var viewport = $ul.parent()[0];
+      slideWidth = viewport ? viewport.getBoundingClientRect().width : 0;
+    }
+
+    $slides.each(function () {
+      var li = this;
+      var style = li.getAttribute("style") || "";
+      if (style.indexOf("translateX") > -1 && slideWidth > 0) {
+        var m = style.match(/translateX\(([^p]+)px\)/);
+        if (m && m[1]) {
+          var pos = Math.round(parseFloat(m[1]) / slideWidth) + 1;
+          if (pos > 0) {
+            li.setAttribute("igh-res-index", String(pos));
+            return;
+          }
+        }
+      }
+      if (!li.hasAttribute("igh-res-index")) {
+        var prev = li.previousElementSibling;
+        var next = li.nextElementSibling;
+        if (prev && prev.hasAttribute("igh-res-index")) {
+          var prevPos = parseInt(prev.getAttribute("igh-res-index"), 10);
+          if (!isNaN(prevPos) && prevPos > 0) li.setAttribute("igh-res-index", String(prevPos + 1));
+        } else if (next && next.hasAttribute("igh-res-index")) {
+          var nextPos = parseInt(next.getAttribute("igh-res-index"), 10);
+          if (!isNaN(nextPos) && nextPos > 1) li.setAttribute("igh-res-index", String(nextPos - 1));
+        }
       }
     });
-    if (!best) return 0;
-    var m = ((best.style && best.style.transform) || "").match(/translateX\(([^p]+)px\)/);
-    if (!m) return 0;
-    return Math.max(0, Math.round(Math.abs(parseFloat(m[1])) / viewportRect.width));
+  }
+
+  function isActivePostRoute() {
+    return /^\/(?:[^/]+\/)?(?:p|reel)\//.test(location.pathname);
+  }
+
+  function getVisibleNodeIndex($main) {
+    if (!$main || !$main.length) return 0;
+
+    if (isActivePostRoute()) {
+      try {
+        var imgIndex = new URLSearchParams(window.location.search).get("img_index");
+        if (imgIndex) {
+          var parsedUrlIndex = parseInt(imgIndex, 10);
+          if (!isNaN(parsedUrlIndex) && parsedUrlIndex >= 1) return parsedUrlIndex - 1;
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }
+
+    var $ul = $main.find("ul[class]").filter(function () {
+      return $(this).children("li").length > 0;
+    }).first();
+    if (!$ul.length) return 0;
+
+    tagCarouselSlides($ul);
+
+    var $slides = $ul.children("li").filter(function () {
+      var w = this.getBoundingClientRect().width;
+      return w > 64 && ($(this).find("img, video").length > 0 || $(this).attr("class"));
+    });
+    if ($slides.length <= 1) {
+      if ($slides.length === 1) {
+        var onlyPos = $slides.get(0).getAttribute("igh-res-index");
+        var onlyParsed = onlyPos ? parseInt(onlyPos, 10) : NaN;
+        if (!isNaN(onlyParsed) && onlyParsed >= 1) return onlyParsed - 1;
+      }
+      return 0;
+    }
+
+    var $viewport = $main.find(".button_wrapper").parent();
+    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) {
+      $viewport = $main
+        .find('*:not([data-pagelet])>*:not([role]):not([data-pagelet])>*:not([style])>*>*[role="presentation"]>*>ul[class]')
+        .parent()
+        .parent("[role]");
+    }
+    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) $viewport = $ul.parent().parent();
+    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) $viewport = $ul.parent();
+
+    if ($viewport.length) {
+      var viewportRect = $viewport.get(0).getBoundingClientRect();
+      var fallbackWidth = viewportRect.width;
+      if (fallbackWidth > 0) {
+        var viewportCenter = (viewportRect.left + viewportRect.right) / 2;
+        var closestSlide = null;
+        var minDistance = Infinity;
+        $slides.each(function () {
+          if (this.getBoundingClientRect().width === 0) return;
+          var rect = this.getBoundingClientRect();
+          var distance = Math.abs((rect.left + rect.right) / 2 - viewportCenter);
+          if (distance < minDistance) {
+            minDistance = distance;
+            closestSlide = this;
+          }
+        });
+        if (closestSlide) {
+          var ighPos = closestSlide.getAttribute("igh-res-index");
+          var parsedPos = ighPos ? parseInt(ighPos, 10) : NaN;
+          if (!isNaN(parsedPos) && parsedPos >= 1) return parsedPos - 1;
+          var style = closestSlide.getAttribute("style") || "";
+          var offsetMatch = style.match(/translateX\(([^p]+)px\)/);
+          if (offsetMatch && offsetMatch[1]) {
+            var offset = parseFloat(offsetMatch[1]);
+            var width = closestSlide.getBoundingClientRect().width || fallbackWidth;
+            if (width > 0) {
+              var offsetIndex = Math.round(offset / width);
+              if (offsetIndex >= 0) return offsetIndex;
+            }
+          }
+          return Math.max(0, $slides.index(closestSlide));
+        }
+      }
+    }
+    return 0;
   }
 
   // ─── Shared IntersectionObserver ───────────────────────────────────────
@@ -345,10 +455,12 @@
       if ($(this).children().length > 0) current = i + 1;
     });
     if (!current) return;
-    var $counter = $element.find("." + className).first();
+    var $target = $element.find(".ignis-storytools").first();
+    if (!$target.length) $target = $element;
+    var $counter = $target.find("." + className).first();
     if (!$counter.length) {
       $counter = $('<div class="' + className + ' ignis-sb-pos">');
-      $element.append($counter);
+      $target.append($counter);
     }
     $counter.text(current + "/" + total).attr("title", "Item " + current + " of " + total);
   }
@@ -374,7 +486,7 @@
       var d = Math.abs((item.taken_at_timestamp || 0) - visibleTs);
       if (d < minDiff) {
         minDiff = d;
-        bestId = item.id;
+        bestId = item.pk || item.id;
       }
     });
     return bestId;
@@ -425,18 +537,12 @@
       }
     }
     if (!target) {
-      var countA = document.querySelectorAll(
-        "body > div section._ac0a header._ac0k > ._ac3r ._ac3n ._ac3p[style]"
-      ).length;
-      var countB = document.querySelectorAll(
-        "body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6"
-      ).length;
+      var countA = $("body > div section._ac0a header._ac0k > ._ac3r ._ac3n ._ac3p[style]").length;
+      var countB = $("body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
       var countC = 0;
-      var base = document.querySelector(
-        "body > div div:not([hidden]) section:visible > div div[style]:not([class]) > div"
-      );
+      var base = $("body > div div:not([hidden]) section:visible > div div[style]:not([class]) > div")[0];
       if (base) {
-        countC = base.querySelectorAll("div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
+        countC = $(base).find("div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
       }
       var nowIndex = countA || countB || countC;
       if (nowIndex > 0 && nowIndex <= items.length) {
@@ -447,13 +553,25 @@
     return { items: items, target: target };
   }
 
-  async function downloadStoryCurrent(type, isPreview) {
+  function getStoryScopeUsername(type) {
     var username = type === "highlights" ? getHighlightsStoryUsername() : getStoryUsername();
     if (!username) {
       var parts = location.pathname.split("/").filter(Boolean);
-      if (parts[0] === "stories" && parts[1]) username = parts[1];
+      if (parts[0] === "stories" && parts[1] && parts[1] !== "highlights") username = parts[1];
     }
-    if (!username) {
+    if (username && username.toLowerCase() === "highlights") username = null;
+    return username || null;
+  }
+
+  function resolveStoryOwner(payload, fallback) {
+    var reel = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0];
+    var owner = reel && (reel.user || reel.owner);
+    return (owner && owner.username) || fallback || null;
+  }
+
+  async function downloadStoryCurrent(type, isPreview) {
+    var username = getStoryScopeUsername(type);
+    if (!username && type !== "highlights") {
       Toasts.error("Cannot resolve the account name.");
       return;
     }
@@ -464,7 +582,7 @@
       if (isFinite(d) && d > 0) ts = Math.floor(d);
     }
     var hasVideo = $("body > div section:visible video[playsinline]").length > 0;
-    if (!hasVideo) {
+    if (!hasVideo && username) {
       var $img = $(
         "body > div section:visible img[referrerpolicy][class], body > div section:visible img._aa63"
       ).first();
@@ -485,9 +603,14 @@
     }
     var payload;
     try {
-      payload = await loadStoryPayload(username, type);
+      payload = await loadStoryPayload(username || "", type);
     } catch (e) {
       Toasts.error("Could not load story data: " + ((e && e.message) || "network error"));
+      return;
+    }
+    username = resolveStoryOwner(payload, username);
+    if (!username) {
+      Toasts.error("Cannot resolve the account name.");
       return;
     }
     var t = await resolveStoryTarget(payload, urlStoryId());
@@ -518,28 +641,29 @@
       }
     }
     if (isPreview) openNewTab(replaceSameOriginHost(item.url));
-    else await saveFiles(item.url, Object.assign({}, meta, { filetype: item.ext || "mp4" }));
+    else await saveFiles(item.url, Object.assign({}, meta, { filetype: item.ext || "mp4", thumbnailURL: item.thumb }));
   }
 
   async function downloadStoryThumbnail(type) {
-    var username = type === "highlights" ? getHighlightsStoryUsername() : getStoryUsername();
-    if (!username) {
-      var parts = location.pathname.split("/").filter(Boolean);
-      if (parts[0] === "stories" && parts[1]) username = parts[1];
-    }
-    if (!username) {
+    var username = getStoryScopeUsername(type);
+    if (!username && type !== "highlights") {
       Toasts.error("Cannot resolve the account name.");
       return;
     }
     try {
-      var payload = await loadStoryPayload(username, type);
+      var payload = await loadStoryPayload(username || "", type);
+      var owner = resolveStoryOwner(payload, username);
+      if (!owner) {
+        Toasts.error("Cannot resolve the account name.");
+        return;
+      }
       var t = await resolveStoryTarget(payload, urlStoryId());
       if (!t || !t.target.thumb) {
         Toasts.error("No thumbnail available.");
         return;
       }
       await saveFiles(t.target.thumb, {
-        username: username,
+        username: owner,
         sourceType: "thumbnail",
         timestamp: t.target.takenAt || Math.floor(Date.now() / 1000),
         shortcode: t.target.id,
@@ -551,25 +675,26 @@
   }
 
   async function downloadStoriesAll(type) {
-    var username = type === "highlights" ? getHighlightsStoryUsername() : getStoryUsername();
-    if (!username) {
-      var parts = location.pathname.split("/").filter(Boolean);
-      if (parts[0] === "stories" && parts[1]) username = parts[1];
-    }
-    if (!username) {
+    var username = getStoryScopeUsername(type);
+    if (!username && type !== "highlights") {
       Toasts.error("Cannot resolve the account name.");
       return;
     }
     try {
-      var payload = await loadStoryPayload(username, type);
+      var payload = await loadStoryPayload(username || "", type);
       var reel = payload.data && payload.data.reels_media && payload.data.reels_media[0];
       var items = normalizeReelItems(reel ? reel.items : []);
       if (!items.length) {
         Toasts.info("No stories available right now.");
         return;
       }
+      var owner = resolveStoryOwner(payload, username);
+      if (!owner) {
+        Toasts.error("Cannot resolve the account name.");
+        return;
+      }
       var meta = {
-        username: username,
+        username: owner,
         shortcode: (reel && reel.id) || "",
         sourceType: type,
         timestamp: Math.floor(Date.now() / 1000),
@@ -578,7 +703,7 @@
       await batchDownload(items, meta);
       if (type === "stories" && USER_SETTING.DOWNLOAD_STORY_HIGHLIGHTS) {
         try {
-          var userInfo = await getUserId(username);
+          var userInfo = await getUserId(owner);
           var uid = (userInfo.user && (userInfo.user.pk || userInfo.user.id)) || null;
           if (uid) {
             var tray = await getUserHighlights(uid);
@@ -588,7 +713,7 @@
               var hItems = normalizeReelItems(hReel ? hReel.items : []);
               if (hItems.length) {
                 await batchDownload(hItems, {
-                  username: username,
+                  username: resolveStoryOwner(hl, owner),
                   shortcode: (hReel && hReel.id) || "",
                   sourceType: "highlights",
                   timestamp: Math.floor(Date.now() / 1000),
@@ -606,76 +731,294 @@
     }
   }
 
+  // ─── Story item resolution & tagged profiles ───────────────────────────
+  function resolveRawStoryItem(payload) {
+    var reel = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0];
+    var items = (reel && reel.items) || [];
+    if (!items.length) return null;
+
+    var urlId = urlStoryId();
+    if (urlId) {
+      for (var i = 0; i < items.length; i++) {
+        var ids = [items[i].id, items[i].pk].filter(function (id) {
+          return id != null;
+        }).map(String);
+        var baseIds = ids.map(function (id) {
+          return id.split("_")[0];
+        });
+        if (ids.indexOf(String(urlId)) > -1 || baseIds.indexOf(String(urlId)) > -1) return items[i];
+      }
+    }
+
+    var $time = $("body > div section:visible time[datetime]")
+      .filter(function () {
+        return (
+          $(this).is(":visible") &&
+          $(this).parents('a[href^="/stories/highlights/"]').length === 0 &&
+          $(this).parents('[role="button"]').length === 0
+        );
+      })
+      .first();
+    if ($time.length) {
+      var visibleTs = Math.floor(new Date($time.attr("datetime")).getTime() / 1000);
+      if (isFinite(visibleTs) && visibleTs) {
+        var best = null;
+        var minDiff = Infinity;
+        items.forEach(function (item) {
+          var diff = Math.abs((item.taken_at_timestamp || item.taken_at || 0) - visibleTs);
+          if (diff < minDiff) {
+            minDiff = diff;
+            best = item;
+          }
+        });
+        if (best && minDiff <= 5) return best;
+      }
+    }
+
+    var countA = $("body > div section._ac0a header._ac0k > ._ac3r ._ac3n ._ac3p[style]").length;
+    var countB = $("body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
+    var nowIndex = countA || countB;
+    if (nowIndex > 0 && nowIndex <= items.length) return items[nowIndex - 1];
+    return items[0];
+  }
+
+  function extractTaggedProfiles(item, excludeUsername) {
+    var profiles = new Map();
+    var stickers = item && Array.isArray(item.story_bloks_stickers) ? item.story_bloks_stickers : [];
+    stickers.forEach(function (sticker) {
+      var username = sticker && sticker.bloks_sticker && sticker.bloks_sticker.sticker_data &&
+        sticker.bloks_sticker.sticker_data.ig_mention && sticker.bloks_sticker.sticker_data.ig_mention.username;
+      if (typeof username !== "string" || !username) return;
+      if (excludeUsername && username.toLowerCase() === excludeUsername.toLowerCase()) return;
+      var key = username.toLowerCase();
+      if (!profiles.has(key)) profiles.set(key, username);
+    });
+    return Array.from(profiles.values());
+  }
+
+  function openTaggedProfilesDialog(usernames, mediaId, errorMessage) {
+    var modal = createModal({
+      title: "Tagged profiles",
+      sub: mediaId ? "media " + String(mediaId).split("_")[0] : "",
+    });
+    if (errorMessage) {
+      modal.body.append('<div class="ignis-empty">' + esc(errorMessage) + "</div>");
+      return modal;
+    }
+    if (!usernames.length) {
+      modal.body.append('<div class="ignis-empty">No profiles are tagged in this story.</div>');
+      return modal;
+    }
+    var list = $('<div class="ignis-tagged-list">');
+    usernames.forEach(function (username) {
+      list.append(
+        '<a class="ignis-tagged" target="_blank" rel="noopener noreferrer" href="https://www.instagram.com/' +
+          encodeURIComponent(username) +
+          '/"><span>@' +
+          esc(username) +
+          "</span>" +
+          SVG.NEW_TAB +
+          "</a>"
+      );
+    });
+    modal.body.append(list);
+    return modal;
+  }
+
+  async function showTaggedProfiles(type) {
+    var username = getStoryScopeUsername(type);
+    if (!username && type !== "highlights") {
+      openTaggedProfilesDialog([], null, "Cannot resolve the account name.");
+      return;
+    }
+    try {
+      var payload = await loadStoryPayload(username || "", type);
+      var item = resolveRawStoryItem(payload);
+      if (!item) {
+        openTaggedProfilesDialog([], null, "Could not identify the active story item.");
+        return;
+      }
+      var owner = resolveStoryOwner(payload, username);
+      var profiles = extractTaggedProfiles(item, owner);
+      openTaggedProfilesDialog(profiles, item.pk || item.id || "", null);
+    } catch (e) {
+      openTaggedProfilesDialog([], null, "Could not load tagged profiles: " + ((e && e.message) || "network error"));
+    }
+  }
+
+  async function openStoryBrowser(type) {
+    var username = getStoryScopeUsername(type);
+    if (!username && type !== "highlights") {
+      Toasts.error("Cannot resolve the account name.");
+      return;
+    }
+    try {
+      var payload = await loadStoryPayload(username || "", type);
+      openStoryDialog(payload, type);
+    } catch (e) {
+      Toasts.error("Could not load the media list: " + ((e && e.message) || "network error"));
+    }
+  }
+
+  function skipStoryConfirm() {
+    if (!USER_SETTING.SKIP_VIEW_STORY_CONFIRM || state.GL_storyConfirmSkipped) return;
+    var $button = $(
+      'div[id^="mount"] section:last-child > div > div:not([class]) div:last-child > div[role="button"]'
+    ).filter(function () {
+      return $(this).children().length === 0 && this.textContent.trim() !== "";
+    });
+    if ($button.length) {
+      $button.first().trigger("click");
+      state.GL_storyConfirmSkipped = true;
+    }
+  }
+
+  function skipSharedWithYouDialog() {
+    if (!USER_SETTING.SKIP_SHARED_WITH_YOU_DIALOG) return;
+    var url;
+    try {
+      url = new URL(window.location.href);
+    } catch (e) {
+      return;
+    }
+    if (!url.searchParams.has("igsh")) return;
+
+    var profileUsername = location.pathname.split("/").filter(Boolean)[0];
+    if (profileUsername) profileUsername = profileUsername.toLowerCase();
+
+    $('div[role="dialog"]').each(function () {
+      var $dialog = $(this);
+      if (!$dialog.is(":visible")) return;
+      var $headers = $dialog.find("h2");
+      if (!$headers.length) return;
+      var isSharedHeader = $headers.filter(function () {
+        var text = (this.textContent || "").trim().toLowerCase();
+        if (!text) return false;
+        if (text.indexOf("shared this with you") > -1) return true;
+        if (text.indexOf("shared with you") > -1) return true;
+        return !!(profileUsername && text.indexOf(profileUsername) > -1 && text.indexOf("shared") > -1);
+      }).length > 0;
+      if (!isSharedHeader) return;
+
+      var $buttons = $dialog.find('div[role="button"]');
+      if (!$buttons.length) return;
+      var $notNow = null;
+      $buttons.each(function () {
+        if ((this.textContent || "").trim().toLowerCase() === "not now") {
+          $notNow = $(this);
+          return false;
+        }
+      });
+      if ((!$notNow || !$notNow.length) && $buttons.length === 2) $notNow = $buttons.last();
+      if ($notNow && $notNow.length) $notNow.trigger("click");
+    });
+  }
+
+  function maybeSkipSharedDialog() {
+    if (!USER_SETTING.SKIP_SHARED_WITH_YOU_DIALOG || !window.location.search.includes("igsh")) return;
+    var tries = 0;
+    var timer = setInterval(function () {
+      if (!window.location.search.includes("igsh") || ++tries > 20) {
+        clearInterval(timer);
+        return;
+      }
+      skipSharedWithYouDialog();
+    }, 200);
+  }
+
+  // ─── Story controls ────────────────────────────────────────────────────
+  function ensureStoryTools($host) {
+    if (getComputedStyle($host[0]).position === "static") $host.css("position", "relative");
+    var $bar = $host.children(".ignis-storytools").first();
+    if (!$bar.length) {
+      $bar = $('<div class="ignis-storytools">');
+      $host.append($bar);
+    }
+    return $bar;
+  }
+
   function attachStoryButtons() {
-    if ($(".ignis-sd").length) return;
     var $element = findStoryContainer();
     if (!$element) return;
+    var $bar = ensureStoryTools($element);
     var username = getStoryUsername() || "";
-    $element.append(
-      makeButton(SVG.DOWNLOAD, "Download this story", "ignis-sd").css({ right: "40px", top: "15px" }),
-      makeButton(SVG.NEW_TAB, "Open story in new tab", "ignis-sn").css({ right: "40px", top: "51px" })
-    );
-    if (getStoryProgress(username).length > 1) {
-      $element.append(
-        makeButton(SVG.DOWNLOAD_ALL, "Download all stories", "ignis-sa").css({ right: "40px", top: "87px" })
+    if (!$bar.find(".ignis-sd").length) {
+      $bar.append(
+        makeButton(SVG.DOWNLOAD, "Download this story", "ignis-sd"),
+        makeButton(SVG.NEW_TAB, "Open story in new tab", "ignis-sn")
       );
+    }
+    if (getStoryProgress(username).length > 1 && !$bar.find(".ignis-sa").length) {
+      $bar.append(makeButton(SVG.DOWNLOAD_ALL, "Download all stories", "ignis-sa"));
+    }
+    if (!$bar.find(".ignis-tp").length) {
+      $bar.append(makeButton(SVG.TAGGED_PROFILES, "Show tagged profiles", "ignis-tp"));
+    }
+    if (!$bar.find(".ignis-sl").length) {
+      $bar.append(makeButton(SVG.LIST, "Browse stories", "ignis-sl"));
     }
     setStoryProgressIndexText($element, "ignis-sp-pos", username);
   }
 
   function attachHighlightButtons() {
-    if ($(".ignis-hd").length) return;
     var $element = findStoryContainer();
     if (!$element) return;
+    var $bar = ensureStoryTools($element);
     var username = getHighlightsStoryUsername() || "";
-    $element.append(
-      makeButton(SVG.DOWNLOAD, "Download this highlight", "ignis-hd").css({ right: "40px", top: "15px" }),
-      makeButton(SVG.NEW_TAB, "Open highlight in new tab", "ignis-hn").css({ right: "40px", top: "51px" })
-    );
-    if (getStoryProgress(username).length > 1) {
-      $element.append(
-        makeButton(SVG.DOWNLOAD_ALL, "Download all highlights", "ignis-ha").css({ right: "40px", top: "87px" })
+    if (!$bar.find(".ignis-hd").length) {
+      $bar.append(
+        makeButton(SVG.DOWNLOAD, "Download this highlight", "ignis-hd"),
+        makeButton(SVG.NEW_TAB, "Open highlight in new tab", "ignis-hn")
       );
+    }
+    if (getStoryProgress(username).length > 1 && !$bar.find(".ignis-ha").length) {
+      $bar.append(makeButton(SVG.DOWNLOAD_ALL, "Download all highlights", "ignis-ha"));
+    }
+    if (!$bar.find(".ignis-htp").length) {
+      $bar.append(makeButton(SVG.TAGGED_PROFILES, "Show tagged profiles", "ignis-htp"));
+    }
+    if (!$bar.find(".ignis-hl").length) {
+      $bar.append(makeButton(SVG.LIST, "Browse highlights", "ignis-hl"));
     }
     setStoryProgressIndexText($element, "ignis-hp-pos", username);
   }
 
   function attachStoryThumbnailButton() {
-    var $story = $(".ignis-sd").first().parent();
-    if (!$story.length) return;
-    if ($story.find("video").length === 0) {
-      $story.find(".ignis-st").remove();
+    var $bar = $(".ignis-sd").first().parent();
+    if (!$bar.length) return;
+    var $host = $bar.parent();
+    if ($host.find("video").length === 0) {
+      $bar.find(".ignis-st").remove();
       return;
     }
-    if ($story.find(".ignis-st").length) return;
-    $story.append(
-      makeButton(SVG.THUMBNAIL, "Download story thumbnail", "ignis-st").css({ right: "40px", top: "87px" })
-    );
+    if ($bar.find(".ignis-st").length) return;
+    $bar.append(makeButton(SVG.THUMBNAIL, "Download story thumbnail", "ignis-st"));
   }
 
   function attachHighlightThumbnailButton() {
-    var $hl = $(".ignis-hd").first().parent();
-    if (!$hl.length) return;
-    if ($hl.find("video").length === 0) {
-      $hl.find(".ignis-ht").remove();
+    var $bar = $(".ignis-hd").first().parent();
+    if (!$bar.length) return;
+    var $host = $bar.parent();
+    if ($host.find("video").length === 0) {
+      $bar.find(".ignis-ht").remove();
       return;
     }
-    if ($hl.find(".ignis-ht").length) return;
-    $hl.append(
-      makeButton(SVG.THUMBNAIL, "Download highlight thumbnail", "ignis-ht").css({ right: "40px", top: "87px" })
-    );
+    if ($bar.find(".ignis-ht").length) return;
+    $bar.append(makeButton(SVG.THUMBNAIL, "Download highlight thumbnail", "ignis-ht"));
   }
 
   function scanStoryPage() {
     attachStoryButtons();
-    var $story = $(".ignis-sd").first().parent();
-    if ($story.find("video").length) attachStoryThumbnailButton();
+    skipStoryConfirm();
+    var $host = $(".ignis-sd").first().closest(".ignis-storytools").parent();
+    if ($host.find("video").length) attachStoryThumbnailButton();
   }
 
   function scanHighlightPage() {
     attachHighlightButtons();
-    var $hl = $(".ignis-hd").first().parent();
-    if ($hl.find("video").length) attachHighlightThumbnailButton();
+    skipStoryConfirm();
+    var $host = $(".ignis-hd").first().closest(".ignis-storytools").parent();
+    if ($host.find("video").length) attachHighlightThumbnailButton();
   }
 
   // ─── Reels ─────────────────────────────────────────────────────────────
@@ -722,11 +1065,12 @@
   // ─── Profile avatar ────────────────────────────────────────────────────
   function attachAvatarButton() {
     if ($(".ignis-pd").length) return;
-    var $img = $(
-      'header > *[class]:first-child > *[class]:first-child img[alt], header > *[class]:first-child img[alt]'
-    ).first();
+    var $img = $("header > *[class]:first-child > *[class]:first-child img[alt]").first();
+    if (!$img.length) $img = $("header > *[class]:first-child img[alt]").first();
     if (!$img.length) return;
-    var $mount = $img.parent().parent();
+    var $mount = $img.is("[draggable]") ? $img.parent().parent() : $img.parent().parent().parent();
+    if (!$mount.length) $mount = $img.parent().parent();
+    if (!$mount.length) return;
     $mount.css("position", "relative");
     if ($mount.find(".ignis-pd").length) return;
     $mount.append(makeButton(SVG.DOWNLOAD, "Download profile picture", "ignis-pd"));
@@ -746,17 +1090,19 @@
       var userInfo = await getUserId(username);
       var uid = (userInfo.user && (userInfo.user.pk || userInfo.user.id)) || null;
       var url = null;
-      if (USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && userInfo.user._hdUrl) {
-        url = userInfo.user._hdUrl;
-      } else if (USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && uid) {
+      if (USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && uid) {
         try {
-          url = await getUserHdAvatar(uid);
+          url = await getUserHdAvatar(uid, username);
         } catch (e) {
           url = null;
         }
       }
+      if (!url && USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && userInfo.user && userInfo.user._hdUrl) {
+        url = userInfo.user._hdUrl;
+      }
       if (!url) {
-        url = $("header img[alt]").first().attr("src");
+        url = (userInfo.user && (userInfo.user.profile_pic_url || userInfo.user.profile_pic_url_hd)) ||
+          $("header img[alt]").first().attr("src");
       }
       if (!url) {
         Toasts.error("Cannot find profile picture URL.");
@@ -786,7 +1132,7 @@
       if (isHl) attachHighlightButtons();
       else attachStoryButtons();
     }
-    var $host = $(btnSel).first().parent();
+    var $host = $(btnSel).first().closest(".ignis-storytools").parent();
     if (!$host.length) return;
     if ($host.find("video").length) {
       if (isHl) attachHighlightThumbnailButton();
@@ -934,7 +1280,8 @@
     });
 
     $body.on("click.ignisEvents", ".ignis-sd", function () {
-      downloadStoryCurrent("stories", false);
+      if (USER_SETTING.DIRECT_DOWNLOAD_STORY) downloadStoriesAll("stories");
+      else downloadStoryCurrent("stories", false);
     });
     $body.on("click.ignisEvents", ".ignis-sn", function () {
       downloadStoryCurrent("stories", true);
@@ -947,7 +1294,8 @@
     });
 
     $body.on("click.ignisEvents", ".ignis-hd", function () {
-      downloadStoryCurrent("highlights", false);
+      if (USER_SETTING.DIRECT_DOWNLOAD_STORY) downloadStoriesAll("highlights");
+      else downloadStoryCurrent("highlights", false);
     });
     $body.on("click.ignisEvents", ".ignis-hn", function () {
       downloadStoryCurrent("highlights", true);
@@ -957,6 +1305,18 @@
     });
     $body.on("click.ignisEvents", ".ignis-ht", function () {
       downloadStoryThumbnail("highlights");
+    });
+    $body.on("click.ignisEvents", ".ignis-tp", function () {
+      showTaggedProfiles("stories");
+    });
+    $body.on("click.ignisEvents", ".ignis-htp", function () {
+      showTaggedProfiles("highlights");
+    });
+    $body.on("click.ignisEvents", ".ignis-sl", function () {
+      openStoryBrowser("stories");
+    });
+    $body.on("click.ignisEvents", ".ignis-hl", function () {
+      openStoryBrowser("highlights");
     });
 
     $body.on("click.ignisEvents", ".ignis-rd", function () {
@@ -977,6 +1337,7 @@
       state.firstStarted = true;
       state.currentURL = location.href;
       state.route = null;
+      state.GL_storyConfirmSkipped = false;
       var path = location.pathname;
       var blacklist =
         /^\/(challenge\/?.*|qr\/?|accounts\/.*|emails\/.*|language\/?.*?|your_activity\/?.*|settings\/help(\/.*)?|auth_platform\/codeentry\/?.*|consent\/?.*)$/i;
@@ -1009,6 +1370,7 @@
       }
       state.pageLoaded = true;
       this.cleanup();
+      maybeSkipSharedDialog();
       // Self-heal: Instagram occasionally swaps the mount node, which would
       // silently orphan the observer. Re-arm it whenever the root died.
       if (!domObserver || !domObserverRoot || !domObserverRoot.isConnected) {
@@ -1058,7 +1420,7 @@
       var now = Date.now();
       Object.keys(state.GL_payloadCache).forEach(function (k) {
         var c = state.GL_payloadCache[k];
-        if (!c || now - c.ts > 600000) delete state.GL_payloadCache[k];
+        if (!c || now - c.ts > POST_CACHE_MAX_AGE) delete state.GL_payloadCache[k];
       });
       // Story/highlight payloads are re-fetchable; keep them for the session
       // (per-item swipes reuse them) but bound total retention.
