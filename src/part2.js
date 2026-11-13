@@ -721,7 +721,6 @@
         return item.user && (item.user.username || "").toLowerCase() === normalized;
       });
       if (!result || !result.user) throw new Error("Polaris search returned no exact user match");
-      if (!result || !result.user) throw new Error("Polaris search result has no user");
       var rawId = result.user.pk || result.user.id;
       if (!rawId) throw new Error("Polaris search result has no user ID");
       return {
