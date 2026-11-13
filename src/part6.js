@@ -117,7 +117,11 @@
             });
             return idbTransactionDone(transaction).then(function () {
               migrated.forEach(function (key) {
-                GM_setValue(key, {});
+                try {
+                  GM_deleteValue(key);
+                } catch (e) {
+                  GM_setValue(key, {});
+                }
               });
               logger("initPersistentCache()", "moved " + migrated.join(", ") + " from GM storage to IndexedDB");
             });

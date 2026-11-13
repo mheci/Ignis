@@ -10,6 +10,7 @@
 // @require            https://cdn.jsdelivr.net/npm/mediabunny@1.34.5/dist/bundles/mediabunny.min.cjs
 // @grant              GM_addStyle
 // @grant              GM_download
+// @grant              GM_deleteValue
 // @grant              GM_getValue
 // @grant              GM_notification
 // @grant              GM_registerMenuCommand

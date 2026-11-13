@@ -70,7 +70,8 @@
 
   function thumbFromDisplayResources(resources) {
     if (!Array.isArray(resources) || !resources.length) return null;
-    var sorted = sortCandidatesDescending(resources, "config_width");
+    var widthKey = resources[0] && resources[0].config_width != null ? "config_width" : "width";
+    var sorted = sortCandidatesDescending(resources, widthKey);
     var best = sorted[0];
     return best ? best.src || best.url || null : null;
   }
@@ -718,7 +719,8 @@
       if (!Array.isArray(users) || !users.length) throw new Error("Polaris search returned no users");
       var result = users.find(function (item) {
         return item.user && (item.user.username || "").toLowerCase() === normalized;
-      }) || users[0];
+      });
+      if (!result || !result.user) throw new Error("Polaris search returned no exact user match");
       if (!result || !result.user) throw new Error("Polaris search result has no user");
       var rawId = result.user.pk || result.user.id;
       if (!rawId) throw new Error("Polaris search result has no user ID");
@@ -834,6 +836,8 @@
           return resolveUserIdLive(key).then(function (info) {
             var fresh = info && info.user && (info.user.pk || info.user.id);
             if (fresh && String(fresh) !== String(userId)) {
+              putUserIdInCache(key, fresh);
+              userIdCache.set(key, Promise.resolve(info));
               return getStories(String(fresh), expectedUsername, true);
             }
             throw new Error("Story owner mismatch");

@@ -10,6 +10,7 @@
 // @require            https://cdn.jsdelivr.net/npm/mediabunny@1.34.5/dist/bundles/mediabunny.min.cjs
 // @grant              GM_addStyle
 // @grant              GM_download
+// @grant              GM_deleteValue
 // @grant              GM_getValue
 // @grant              GM_notification
 // @grant              GM_registerMenuCommand
@@ -726,7 +727,8 @@
 
   function thumbFromDisplayResources(resources) {
     if (!Array.isArray(resources) || !resources.length) return null;
-    var sorted = sortCandidatesDescending(resources, "config_width");
+    var widthKey = resources[0] && resources[0].config_width != null ? "config_width" : "width";
+    var sorted = sortCandidatesDescending(resources, widthKey);
     var best = sorted[0];
     return best ? best.src || best.url || null : null;
   }
@@ -1365,7 +1367,8 @@
       if (!Array.isArray(users) || !users.length) throw new Error("Polaris search returned no users");
       var result = users.find(function (item) {
         return item.user && (item.user.username || "").toLowerCase() === normalized;
-      }) || users[0];
+      });
+      if (!result || !result.user) throw new Error("Polaris search returned no exact user match");
       if (!result || !result.user) throw new Error("Polaris search result has no user");
       var rawId = result.user.pk || result.user.id;
       if (!rawId) throw new Error("Polaris search result has no user ID");
@@ -1480,6 +1483,8 @@
           return resolveUserIdLive(key).then(function (info) {
             var fresh = info && info.user && (info.user.pk || info.user.id);
             if (fresh && String(fresh) !== String(userId)) {
+              putUserIdInCache(key, fresh);
+              userIdCache.set(key, Promise.resolve(info));
               return getStories(String(fresh), expectedUsername, true);
             }
             throw new Error("Story owner mismatch");
@@ -4069,7 +4074,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       var userInfo = await getUserId(username);
       var uid = (userInfo.user && (userInfo.user.pk || userInfo.user.id)) || null;
       if (!uid) throw new Error("Cannot resolve user id");
-      payload = await getStories(uid);
+      payload = await getStories(uid, username);
     }
     state.GL_dataCache[cacheKey][cacheId] = payload;
     return payload;
@@ -4649,13 +4654,37 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           url = await getUserHdAvatar(uid, username);
         } catch (e) {
           url = null;
+          if (e && e.message === "Avatar owner mismatch") {
+            var key = username.toLowerCase();
+            delete state.GL_userIdCache[key];
+            setPersistentCache(USER_ID_CACHE_KEY, state.GL_userIdCache);
+            userIdCache.delete(key);
+            try {
+              var fresh = await resolveUserIdLive(username);
+              var freshId = fresh && fresh.user && (fresh.user.pk || fresh.user.id);
+              if (freshId) {
+                putUserIdInCache(key, freshId);
+                userIdCache.set(key, Promise.resolve(fresh));
+                userInfo = fresh;
+                uid = freshId;
+                try {
+                  url = await getUserHdAvatar(freshId, username);
+                } catch (e2) {
+                  url = null;
+                }
+              }
+            } catch (e2) {
+              userInfo = null;
+              uid = null;
+            }
+          }
         }
       }
-      if (!url && USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && userInfo.user && userInfo.user._hdUrl) {
+      if (!url && USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && userInfo && userInfo.user && userInfo.user._hdUrl) {
         url = userInfo.user._hdUrl;
       }
       if (!url) {
-        url = (userInfo.user && (userInfo.user.profile_pic_url || userInfo.user.profile_pic_url_hd)) ||
+        url = (userInfo && userInfo.user && (userInfo.user.profile_pic_url || userInfo.user.profile_pic_url_hd)) ||
           $("header img[alt]").first().attr("src");
       }
       if (!url) {
@@ -5104,7 +5133,11 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
             });
             return idbTransactionDone(transaction).then(function () {
               migrated.forEach(function (key) {
-                GM_setValue(key, {});
+                try {
+                  GM_deleteValue(key);
+                } catch (e) {
+                  GM_setValue(key, {});
+                }
               });
               logger("initPersistentCache()", "moved " + migrated.join(", ") + " from GM storage to IndexedDB");
             });
