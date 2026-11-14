@@ -1,0 +1,89 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ignis-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - run: node build.js
+      - run: node --check ignis.user.js
+      - name: Verify committed build is current
+        run: git diff --exit-code -- ignis.user.js
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - run: node build.js
+      - run: node --check ignis.user.js
+      - name: Tag and release when artifact @version has no release yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_COMMITTER_NAME: mheci
+          GIT_COMMITTER_EMAIL: 274998646+mheci@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git config user.name "${GIT_COMMITTER_NAME}"
+          git config user.email "${GIT_COMMITTER_EMAIL}"
+          VER="$(sed -nE 's|^// @version[[:space:]]+([^[:space:]]+).*|\1|p' ignis.user.js | head -n1)"
+          echo "artifact @version: ${VER}"
+          test -n "${VER}"
+          TAG="v${VER}"
+          if gh release view "${TAG}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release ${TAG} already published, nothing to do"
+            exit 0
+          fi
+          PREV="$(git describe --tags --abbrev=0 --match='v*' "${GITHUB_SHA}" 2>/dev/null || true)"
+          {
+            printf 'IGNIS %s\n\n' "${TAG}"
+            printf '**Install:** https://github.com/mheci/Ignis/releases/latest/download/ignis.user.js\n\n'
+            printf 'Paste that link into Tampermonkey/Violentmonkey/Greasemonkey, or grab the attached ignis.user.js. The @updateURL/@downloadURL headers point at this permanent releases/latest link, so updates are detected automatically.\n\n'
+            printf '### Changes\n'
+            if [ -n "${PREV}" ]; then
+              git log --format='- %s' "${PREV}..${GITHUB_SHA}"
+            else
+              git log --format='- %s' | head -30
+            fi
+            printf '\nBuilt from %s.\n' "$(git rev-parse --short "${GITHUB_SHA}")"
+          } > notes.md
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "refs/tags/${TAG}$"; then
+            echo "tag ${TAG} already exists, attaching release to it"
+          else
+            git tag -a "${TAG}" -m "IGNIS ${TAG}" "${GITHUB_SHA}"
+            git push origin "${TAG}"
+          fi
+          gh release create "${TAG}" ignis.user.js --repo "$GITHUB_REPOSITORY" --title "IGNIS ${TAG}" --notes-file notes.md --latest
+      - name: Verify published channel serves the new version
+        run: |
+          set -euo pipefail
+          sleep 5
+          code="$(curl -sSL -o /tmp/pub.js -w '%{http_code}' https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/ignis.user.js)"
+          echo "GET releases/latest/download/ignis.user.js -> HTTP ${code}"
+          test "${code}" = "200"
+          grep -q "@version" /tmp/pub.js && echo "channel carries a userscript payload"
