@@ -59,26 +59,15 @@ jobs:
             echo "release ${TAG} already published, nothing to do"
             exit 0
           fi
-          PREV="$(git describe --tags --abbrev=0 --match='v*' "${GITHUB_SHA}" 2>/dev/null || true)"
-          {
-            printf 'IGNIS %s\n\n' "${TAG}"
-            printf '**Install:** https://github.com/mheci/Ignis/releases/latest/download/ignis.user.js\n\n'
-            printf 'Paste that link into Tampermonkey/Violentmonkey/Greasemonkey, or grab the attached ignis.user.js. The @updateURL/@downloadURL headers point at this permanent releases/latest link, so updates are detected automatically.\n\n'
-            printf '### Changes\n'
-            if [ -n "${PREV}" ]; then
-              git log --format='- %s' "${PREV}..${GITHUB_SHA}"
-            else
-              git log --format='- %s' | head -30
-            fi
-            printf '\nBuilt from %s.\n' "$(git rev-parse --short "${GITHUB_SHA}")"
-          } > notes.md
           if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "refs/tags/${TAG}$"; then
             echo "tag ${TAG} already exists, attaching release to it"
           else
             git tag -a "${TAG}" -m "IGNIS ${TAG}" "${GITHUB_SHA}"
             git push origin "${TAG}"
           fi
-          gh release create "${TAG}" ignis.user.js --repo "$GITHUB_REPOSITORY" --title "IGNIS ${TAG}" --notes-file notes.md --latest
+          gh release create "${TAG}" ignis.user.js --repo "$GITHUB_REPOSITORY" --title "IGNIS ${TAG}" --notes " " --latest
+          RELEASE_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq .id)"
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -f body="" >/dev/null
       - name: Verify published channel serves the new version
         run: |
           set -euo pipefail
