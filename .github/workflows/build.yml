@@ -16,16 +16,30 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20
+          node-version: 22
       - run: node build.js
       - run: node --check ignis.user.js
       - name: Verify committed build is current
         run: git diff --exit-code -- ignis.user.js
+      - name: Test runtime contracts and release rules (no publishing)
+        run: |
+          node --test tests/core.test.cjs
+          python3 tests/release_test.py
+      - name: Install test-only browser driver and media verifier
+        run: |
+          /usr/bin/python3.12 -m venv "$RUNNER_TEMP/ignis-venv"
+          "$RUNNER_TEMP/ignis-venv/bin/python" -m pip install --only-binary=:all: --require-hashes -r tests/requirements-browser.txt
+          if ! command -v ffprobe >/dev/null; then sudo apt-get update && sudo apt-get install -y ffmpeg; fi
+      - name: Exercise the committed bundle in Chromium with offline page and media fixtures
+        run: '"$RUNNER_TEMP/ignis-venv/bin/python" tests/browser.py --chrome "$(command -v google-chrome || command -v chromium)"'
 
   release:
     needs: build
@@ -39,40 +53,12 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20
+          node-version: 22
       - run: node build.js
       - run: node --check ignis.user.js
-      - name: Tag and release when artifact @version has no release yet
+      - name: Publish or verify the immutable stable asset
         env:
           GH_TOKEN: ${{ github.token }}
           GIT_COMMITTER_NAME: mheci
           GIT_COMMITTER_EMAIL: 274998646+mheci@users.noreply.github.com
-        run: |
-          set -euo pipefail
-          git config user.name "${GIT_COMMITTER_NAME}"
-          git config user.email "${GIT_COMMITTER_EMAIL}"
-          VER="$(sed -nE 's|^// @version[[:space:]]+([^[:space:]]+).*|\1|p' ignis.user.js | head -n1)"
-          echo "artifact @version: ${VER}"
-          test -n "${VER}"
-          TAG="v${VER}"
-          if gh release view "${TAG}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release ${TAG} already published, nothing to do"
-            exit 0
-          fi
-          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "refs/tags/${TAG}$"; then
-            echo "tag ${TAG} already exists, attaching release to it"
-          else
-            git tag -a "${TAG}" -m "IGNIS ${TAG}" "${GITHUB_SHA}"
-            git push origin "${TAG}"
-          fi
-          gh release create "${TAG}" ignis.user.js --repo "$GITHUB_REPOSITORY" --title "IGNIS ${TAG}" --notes " " --latest
-          RELEASE_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq .id)"
-          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -f body="" >/dev/null
-      - name: Verify published channel serves the new version
-        run: |
-          set -euo pipefail
-          sleep 5
-          code="$(curl -sSL -o /tmp/pub.js -w '%{http_code}' https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/ignis.user.js)"
-          echo "GET releases/latest/download/ignis.user.js -> HTTP ${code}"
-          test "${code}" = "200"
-          grep -q "@version" /tmp/pub.js && echo "channel carries a userscript payload"
+        run: bash scripts/release.sh
