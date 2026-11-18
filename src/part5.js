@@ -878,10 +878,23 @@
   function attachReelBar($main) {
     if (!$main || !$main.length || $main.find(".ignis-rd, .ignis-bar").length) return;
     positionHost($main[0]);
-    $main.append(
-      makeButton(SVG.DOWNLOAD, "Download reel", "ignis-rd").css({ right: "40px", top: "15px" }),
-      makeButton(SVG.NEW_TAB, "Open reel in new tab", "ignis-rn").css({ right: "40px", top: "51px" })
-    );
+    const action = (preview) => {
+      const button = makeButton(preview ? SVG.NEW_TAB : SVG.DOWNLOAD,
+        preview ? "Open reel in new tab" : "Download reel", preview ? "ignis-rn" : "ignis-rd");
+      button.css({right:"40px", top:preview ? "51px" : "15px"});
+      // Instagram can consume the bubble at its playback controller before
+      // it reaches document. Handle our own control, not the site's click.
+      button.on("click", function (event) {
+        event.preventDefault(); event.stopPropagation();
+        if (this.disabled) return;
+        this.disabled = true;
+        downloadCurrentReel(preview, this)
+          .catch(err => Toasts.error("Could not open reel: " + (err?.message || err)))
+          .finally(() => { this.disabled = false; });
+      });
+      return button;
+    };
+    $main.append(action(false), action(true));
   }
 
   function onReelsPage() {
@@ -889,15 +902,32 @@
       if (video.closest(".ignis-modal")) continue;
       const rect = video.getBoundingClientRect();
       if (rect.width < 140 || rect.height < 120) continue;
+      // A transparent Instagram play/pause target can be a *sibling* of the
+      // transformed video layer. A high z-index inside that layer cannot win.
+      // Mount on the enclosing single-reel surface, never the whole feed.
       let host = video.parentElement;
       for (let el = host; el && !el.matches("main, body"); el = el.parentElement) {
         if (el.querySelectorAll("video").length !== 1) break;
+        const box = el.getBoundingClientRect();
+        if (box.width >= rect.width - 2 && box.width <= rect.width + 16 &&
+            box.height >= rect.height - 2 && box.height <= rect.height + 48 &&
+            Math.abs(box.left - rect.left) < 12 && Math.abs(box.top - rect.top) < 32) host = el;
         if (Array.from(el.querySelectorAll("a[href]")).some((a) => postCode(a.href))) {
           host = el;
           break;
         }
       }
-      if (host) attachReelBar($(host));
+      if (host) {
+        // If React moved the native overlay above our old mount, move the
+        // existing controls rather than adding another toolbar.
+        const old = host.querySelector(".ignis-rd");
+        if (old && old.parentElement !== host) {
+          positionHost(host);
+          const preview = old.parentElement.querySelector(".ignis-rn");
+          host.appendChild(old);
+          if (preview) host.appendChild(preview);
+        } else attachReelBar($(host));
+      }
     }
   }
 
@@ -923,7 +953,9 @@
       Toasts.info("No downloadable reel is visible.");
       return;
     }
+    logger("Resolving visible reel", code);
     const loaded = await resolvePostShortcode(code, { post: host, complete: true });
+    logger("Reel lookup complete", loaded?.items?.length || 0);
     if (loaded && location.href === route && host.isConnected) {
       const videoItem = loaded.items.find((i) => i.isVideo);
       if (videoItem)
@@ -1253,13 +1285,6 @@
     });
     $(document).on("click.ignisEvents", ".ignis-hl", function () {
       openStoryBrowser("highlights");
-    });
-
-    $(document).on("click.ignisEvents", ".ignis-rd", function () {
-      downloadCurrentReel(false, this);
-    });
-    $(document).on("click.ignisEvents", ".ignis-rn", function () {
-      downloadCurrentReel(true, this);
     });
 
     $(document).on("click.ignisEvents", ".ignis-pd", function () {

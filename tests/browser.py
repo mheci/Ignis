@@ -197,8 +197,8 @@ class Lab:
             return
         if u.hostname == "scontent.fixture.cdninstagram.com":
             name = Path(u.path).name
-            if name == "broken.mp4":
-                route.fulfill(status=403, content_type="text/html", body="Unavailable")
+            if name in ("broken.mp4", "denied.mp4"):
+                route.fulfill(status=404 if name=="broken.mp4" else 429, content_type="text/html", headers={"access-control-allow-origin":"*"}, body="Unavailable")
                 return
             if name == "not-media.jpg":
                 route.fulfill(content_type="text/html", body="Sign in")
@@ -463,7 +463,13 @@ def dash_and_stories(launch, ok):
     p.locator(".ignis-dl").click()
     p.locator(".ig-act-dl").click()
     assert l.saved(2)[1]["url"] == PROGRESSIVE
-    ok("unavailable complete DASH stream falls back to an offered progressive file")
+    ok("missing DASH track (404) falls back to an offered progressive file")
+    l.close_dialog()
+    l.spa("/p/Hold/", article("Hold") + embedded(post("Hold", [movie(MPD.replace(VIDEO, CDN + "/denied.mp4"))])))
+    p.locator(".ignis-dl").click(); p.locator(".ig-act-dl").click()
+    expect(p.locator(".ignis-toast-error").last).to_contain_text("429")
+    assert p.evaluate("fixture.sent.length") == 2
+    ok("rate-limited track is reported without a progressive retry or file handoff")
     l.done()
 
     l = launch(seed={"USER_IDS_STORED": {"studio": "77"}})
@@ -542,6 +548,15 @@ def focused_media_and_profile(launch, ok):
     p.locator(".ignis-rn").nth(1).click()
     assert p.evaluate("fixture.tabs") == [PROGRESSIVE] and p.evaluate("fixture.sent.length") == 1
     ok("narrow multi-reel layout previews the clicked player without initiating a download")
+    l.spa("/reels/Focus01/", '<main onclick="event.stopPropagation()"><div style="position:relative;width:260px;height:205px">'
+          '<div style="transform:translateZ(0);width:100%;height:100%"><video width="260" height="205" preload="none" src="'
+          + PROGRESSIVE + '"></video></div><div role="button" style="position:absolute;inset:0;z-index:2"></div></div></main>')
+    button = p.locator(".ignis-rn")
+    expect(button).to_have_count(1)
+    assert button.evaluate("n=>{const r=n.getBoundingClientRect();return n.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))}")
+    button.click()
+    assert p.evaluate("fixture.tabs.at(-1)") == PROGRESSIVE
+    ok("reel toolbar receives a real pointer above the native sibling play overlay")
     l.spa(
         "/studio/",
         '<header><div class="outer"><div class="inner"><img alt="studio profile" width="150" height="150" src="'

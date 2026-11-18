@@ -1461,63 +1461,105 @@
      Ignis Forge — download engine
      ============================================================ */
 
+  const MAX_TRACK_BYTES = 128 * 1024 * 1024;
+  const CDN_IDLE_MS = 45000;
+  function mediaStatusError(status) {
+    return Object.assign(new Error("Media returned HTTP " + status), {
+      stopLookup: [401, 403, 429, 451].includes(status),
+      canTryAlternate: status === 404 || status === 410
+    });
+  }
+  function validateMediaType(type) {
+    if (type && !/^(image\/(?:jpe?g|webp|avif|png|gif)|(?:video|audio)\/[\w.+-]+|application\/(?:octet-stream|mp4|binary))$/i.test(type.split(";")[0].trim()))
+      throw Object.assign(new Error("Server did not return media"), { stopLookup: true });
+  }
   function gmFetch(raw, responseType) {
     const url = trustedURL(raw);
     if (!url) return Promise.reject(new Error("Unsupported media link"));
     if (!manager.xhr) return Promise.reject(new Error("This userscript manager cannot fetch media"));
     return new Promise((resolve, reject) => {
-      let handle;
-      const limit = 128 * 1024 * 1024;
-      const opts = {
-        method: "GET",
-        url,
-        responseType,
-        anonymous: true,
-        redirect: "error",
-        timeout: 60000,
+      let handle, timer, done = false, received = 0;
+      const finish = (err, value) => {
+        if (done) return;
+        done = true; clearTimeout(timer);
+        if (err) reject(err); else resolve(value);
+      };
+      const stop = err => { finish(err); try { handle?.abort?.(); } catch (_) {} };
+      const arm = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => stop(new Error("Media transfer stopped making progress")), CDN_IDLE_MS);
+      };
+      const options = {
+        method: "GET", url, responseType, anonymous: true, redirect: "error", timeout: 60000,
         onprogress(ev) {
-          if (responseType === "arraybuffer" && Math.max(ev.total || 0, ev.loaded || 0) > limit) {
-            reject(new Error("DASH track is too large for in-memory merging"));
-            handle?.abort?.();
-          }
+          if (done) return;
+          if (responseType === "arraybuffer" && Math.max(ev.total || 0, ev.loaded || 0) > MAX_TRACK_BYTES)
+            return stop(new Error("DASH track is too large for in-memory merging"));
+          if (ev.loaded > received) { received = ev.loaded; arm(); }
         },
         onload(res) {
-          if (res.status < 200 || res.status >= 300)
-            return reject(
-              Object.assign(new Error("Media returned HTTP " + res.status), {
-                canTryAlternate: res.status === 404 || res.status === 410
-              })
-            );
-          if (!trustedURL(res.finalUrl || url)) return reject(new Error("Unsupported media redirect"));
-          const type =
-            /^content-type:\s*([^;\r\n]+)/im.exec(res.responseHeaders || "")?.[1] || res.response?.type || "";
-          if (
-            type &&
-            !/^(image\/(?:jpe?g|webp|avif|png|gif)|(?:video|audio)\/[\w.+-]+|application\/(?:octet-stream|mp4|binary))$/i.test(
-              type.trim()
-            )
-          )
-            return reject(new Error("Server did not return media"));
-          if (!(res.response?.size > 0 || res.response?.byteLength > 0))
-            return reject(new Error("Empty media response"));
-          if (responseType === "arraybuffer" && res.response.byteLength > limit)
-            return reject(new Error("DASH track is too large for in-memory merging"));
-          resolve(res.response);
+          if (done) return;
+          try {
+            if (res.status < 200 || res.status >= 300) throw mediaStatusError(res.status);
+            if (!trustedURL(res.finalUrl || url)) throw new Error("Unsupported media redirect");
+            validateMediaType(/^content-type:\s*([^;\r\n]+)/im.exec(res.responseHeaders || "")?.[1] || res.response?.type);
+            const size = res.response?.size || res.response?.byteLength || 0;
+            if (!size) throw new Error("Empty media response");
+            if (responseType === "arraybuffer" && size > MAX_TRACK_BYTES) throw new Error("DASH track too large");
+            logger("Media transfer complete", responseType, size);
+            finish(null, res.response);
+          } catch (err) { finish(err); }
         },
-        onerror: () => reject(Object.assign(new Error("Media request failed"), { canTryAlternate: true })),
-        ontimeout: () => reject(Object.assign(new Error("Media request timed out"), { canTryAlternate: true })),
-        onabort: () => reject(new Error("Media request cancelled"))
+        onerror: () => finish(Object.assign(new Error("Media request failed"), {canTryAlternate: true})),
+        ontimeout: () => stop(new Error("Media request timed out")),
+        onabort: () => finish(new Error("Media request cancelled"))
       };
-      handle = manager.xhr(opts);
-      // Promise-only managers need not call the legacy callbacks.
-      if (handle?.then)
-        handle.then((r) => {
-          if (r) opts.onload(r);
-        }, reject);
+      arm();
+      try {
+        handle = manager.xhr(options);
+        if (handle?.then) handle.then(r => { if (r) options.onload(r); }, e => finish(e));
+      } catch (err) { finish(err); }
     });
   }
-  function fetchArrayBuffer(url) {
-    return gmFetch(url, "arraybuffer");
+
+  // Read a complete public DASH track in the browser when its CDN permits
+  // CORS. This keeps large binary messages out of extension-worker IPC.
+  async function fetchArrayBuffer(raw) {
+    const url = trustedURL(raw);
+    if (!url) throw new Error("Unsupported track URL");
+    if (typeof fetch !== "function" || typeof AbortController !== "function") return gmFetch(url, "arraybuffer");
+    const ctl = new AbortController();
+    let timer;
+    const arm = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), CDN_IDLE_MS); };
+    arm();
+    try {
+      logger("Reading offered DASH track", new URL(url).hostname);
+      const res = await fetch(url, {mode:"cors", credentials:"omit", redirect:"manual", signal:ctl.signal});
+      if (res.type === "opaqueredirect") throw Object.assign(new Error("Refused a media redirect"), {stopLookup:true});
+      if (!res.ok) throw mediaStatusError(res.status);
+      validateMediaType(res.headers.get("content-type"));
+      const limit = MAX_TRACK_BYTES;
+      if (+res.headers.get("content-length") > limit) throw new Error("DASH track too large");
+      if (res.status === 206) {
+        const range = /^bytes 0-(\d+)\/(\d+)$/.exec(res.headers.get("content-range") || "");
+        if (!range || Number(range[1])+1 !== Number(range[2])) throw new Error("Incomplete DASH track");
+      }
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No readable track data");
+      let total = 0;
+      const chunks = [];
+      for (;;) {
+        const {done,value} = await reader.read();
+        if (done) break;
+        if (!value?.byteLength) continue;
+        arm(); total += value.byteLength;
+        if (total > limit) throw new Error("DASH track too large");
+        chunks.push(value);
+      }
+      if (!total) throw new Error("Empty DASH track");
+      logger("Read complete DASH track", total);
+      return new Blob(chunks).arrayBuffer();
+    } finally { clearTimeout(timer); ctl.abort(); }
   }
 
   function managerDownload(url, name) {
@@ -2135,8 +2177,11 @@
       let merged;
       try {
         const [v, a] = await Promise.all([fetchArrayBuffer(video.url), fetchArrayBuffer(audio.url)]);
+        logger("Merging downloaded audio and video");
         merged = new Blob([await muxDashVideoAudioToMp4(v, a)], { type: "video/mp4" });
+        logger("Merged MP4", merged.size);
       } catch (e) {
+        if (e.stopLookup) throw e;
         logger("DASH unavailable; trying offered progressive media", e.message);
         return false;
       }
@@ -4297,10 +4342,23 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   function attachReelBar($main) {
     if (!$main || !$main.length || $main.find(".ignis-rd, .ignis-bar").length) return;
     positionHost($main[0]);
-    $main.append(
-      makeButton(SVG.DOWNLOAD, "Download reel", "ignis-rd").css({ right: "40px", top: "15px" }),
-      makeButton(SVG.NEW_TAB, "Open reel in new tab", "ignis-rn").css({ right: "40px", top: "51px" })
-    );
+    const action = (preview) => {
+      const button = makeButton(preview ? SVG.NEW_TAB : SVG.DOWNLOAD,
+        preview ? "Open reel in new tab" : "Download reel", preview ? "ignis-rn" : "ignis-rd");
+      button.css({right:"40px", top:preview ? "51px" : "15px"});
+      // Instagram can consume the bubble at its playback controller before
+      // it reaches document. Handle our own control, not the site's click.
+      button.on("click", function (event) {
+        event.preventDefault(); event.stopPropagation();
+        if (this.disabled) return;
+        this.disabled = true;
+        downloadCurrentReel(preview, this)
+          .catch(err => Toasts.error("Could not open reel: " + (err?.message || err)))
+          .finally(() => { this.disabled = false; });
+      });
+      return button;
+    };
+    $main.append(action(false), action(true));
   }
 
   function onReelsPage() {
@@ -4308,15 +4366,32 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       if (video.closest(".ignis-modal")) continue;
       const rect = video.getBoundingClientRect();
       if (rect.width < 140 || rect.height < 120) continue;
+      // A transparent Instagram play/pause target can be a *sibling* of the
+      // transformed video layer. A high z-index inside that layer cannot win.
+      // Mount on the enclosing single-reel surface, never the whole feed.
       let host = video.parentElement;
       for (let el = host; el && !el.matches("main, body"); el = el.parentElement) {
         if (el.querySelectorAll("video").length !== 1) break;
+        const box = el.getBoundingClientRect();
+        if (box.width >= rect.width - 2 && box.width <= rect.width + 16 &&
+            box.height >= rect.height - 2 && box.height <= rect.height + 48 &&
+            Math.abs(box.left - rect.left) < 12 && Math.abs(box.top - rect.top) < 32) host = el;
         if (Array.from(el.querySelectorAll("a[href]")).some((a) => postCode(a.href))) {
           host = el;
           break;
         }
       }
-      if (host) attachReelBar($(host));
+      if (host) {
+        // If React moved the native overlay above our old mount, move the
+        // existing controls rather than adding another toolbar.
+        const old = host.querySelector(".ignis-rd");
+        if (old && old.parentElement !== host) {
+          positionHost(host);
+          const preview = old.parentElement.querySelector(".ignis-rn");
+          host.appendChild(old);
+          if (preview) host.appendChild(preview);
+        } else attachReelBar($(host));
+      }
     }
   }
 
@@ -4342,7 +4417,9 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       Toasts.info("No downloadable reel is visible.");
       return;
     }
+    logger("Resolving visible reel", code);
     const loaded = await resolvePostShortcode(code, { post: host, complete: true });
+    logger("Reel lookup complete", loaded?.items?.length || 0);
     if (loaded && location.href === route && host.isConnected) {
       const videoItem = loaded.items.find((i) => i.isVideo);
       if (videoItem)
@@ -4672,13 +4749,6 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     });
     $(document).on("click.ignisEvents", ".ignis-hl", function () {
       openStoryBrowser("highlights");
-    });
-
-    $(document).on("click.ignisEvents", ".ignis-rd", function () {
-      downloadCurrentReel(false, this);
-    });
-    $(document).on("click.ignisEvents", ".ignis-rn", function () {
-      downloadCurrentReel(true, this);
     });
 
     $(document).on("click.ignisEvents", ".ignis-pd", function () {

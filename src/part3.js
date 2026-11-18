@@ -2,63 +2,105 @@
      Ignis Forge — download engine
      ============================================================ */
 
+  const MAX_TRACK_BYTES = 128 * 1024 * 1024;
+  const CDN_IDLE_MS = 45000;
+  function mediaStatusError(status) {
+    return Object.assign(new Error("Media returned HTTP " + status), {
+      stopLookup: [401, 403, 429, 451].includes(status),
+      canTryAlternate: status === 404 || status === 410
+    });
+  }
+  function validateMediaType(type) {
+    if (type && !/^(image\/(?:jpe?g|webp|avif|png|gif)|(?:video|audio)\/[\w.+-]+|application\/(?:octet-stream|mp4|binary))$/i.test(type.split(";")[0].trim()))
+      throw Object.assign(new Error("Server did not return media"), { stopLookup: true });
+  }
   function gmFetch(raw, responseType) {
     const url = trustedURL(raw);
     if (!url) return Promise.reject(new Error("Unsupported media link"));
     if (!manager.xhr) return Promise.reject(new Error("This userscript manager cannot fetch media"));
     return new Promise((resolve, reject) => {
-      let handle;
-      const limit = 128 * 1024 * 1024;
-      const opts = {
-        method: "GET",
-        url,
-        responseType,
-        anonymous: true,
-        redirect: "error",
-        timeout: 60000,
+      let handle, timer, done = false, received = 0;
+      const finish = (err, value) => {
+        if (done) return;
+        done = true; clearTimeout(timer);
+        if (err) reject(err); else resolve(value);
+      };
+      const stop = err => { finish(err); try { handle?.abort?.(); } catch (_) {} };
+      const arm = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => stop(new Error("Media transfer stopped making progress")), CDN_IDLE_MS);
+      };
+      const options = {
+        method: "GET", url, responseType, anonymous: true, redirect: "error", timeout: 60000,
         onprogress(ev) {
-          if (responseType === "arraybuffer" && Math.max(ev.total || 0, ev.loaded || 0) > limit) {
-            reject(new Error("DASH track is too large for in-memory merging"));
-            handle?.abort?.();
-          }
+          if (done) return;
+          if (responseType === "arraybuffer" && Math.max(ev.total || 0, ev.loaded || 0) > MAX_TRACK_BYTES)
+            return stop(new Error("DASH track is too large for in-memory merging"));
+          if (ev.loaded > received) { received = ev.loaded; arm(); }
         },
         onload(res) {
-          if (res.status < 200 || res.status >= 300)
-            return reject(
-              Object.assign(new Error("Media returned HTTP " + res.status), {
-                canTryAlternate: res.status === 404 || res.status === 410
-              })
-            );
-          if (!trustedURL(res.finalUrl || url)) return reject(new Error("Unsupported media redirect"));
-          const type =
-            /^content-type:\s*([^;\r\n]+)/im.exec(res.responseHeaders || "")?.[1] || res.response?.type || "";
-          if (
-            type &&
-            !/^(image\/(?:jpe?g|webp|avif|png|gif)|(?:video|audio)\/[\w.+-]+|application\/(?:octet-stream|mp4|binary))$/i.test(
-              type.trim()
-            )
-          )
-            return reject(new Error("Server did not return media"));
-          if (!(res.response?.size > 0 || res.response?.byteLength > 0))
-            return reject(new Error("Empty media response"));
-          if (responseType === "arraybuffer" && res.response.byteLength > limit)
-            return reject(new Error("DASH track is too large for in-memory merging"));
-          resolve(res.response);
+          if (done) return;
+          try {
+            if (res.status < 200 || res.status >= 300) throw mediaStatusError(res.status);
+            if (!trustedURL(res.finalUrl || url)) throw new Error("Unsupported media redirect");
+            validateMediaType(/^content-type:\s*([^;\r\n]+)/im.exec(res.responseHeaders || "")?.[1] || res.response?.type);
+            const size = res.response?.size || res.response?.byteLength || 0;
+            if (!size) throw new Error("Empty media response");
+            if (responseType === "arraybuffer" && size > MAX_TRACK_BYTES) throw new Error("DASH track too large");
+            logger("Media transfer complete", responseType, size);
+            finish(null, res.response);
+          } catch (err) { finish(err); }
         },
-        onerror: () => reject(Object.assign(new Error("Media request failed"), { canTryAlternate: true })),
-        ontimeout: () => reject(Object.assign(new Error("Media request timed out"), { canTryAlternate: true })),
-        onabort: () => reject(new Error("Media request cancelled"))
+        onerror: () => finish(Object.assign(new Error("Media request failed"), {canTryAlternate: true})),
+        ontimeout: () => stop(new Error("Media request timed out")),
+        onabort: () => finish(new Error("Media request cancelled"))
       };
-      handle = manager.xhr(opts);
-      // Promise-only managers need not call the legacy callbacks.
-      if (handle?.then)
-        handle.then((r) => {
-          if (r) opts.onload(r);
-        }, reject);
+      arm();
+      try {
+        handle = manager.xhr(options);
+        if (handle?.then) handle.then(r => { if (r) options.onload(r); }, e => finish(e));
+      } catch (err) { finish(err); }
     });
   }
-  function fetchArrayBuffer(url) {
-    return gmFetch(url, "arraybuffer");
+
+  // Read a complete public DASH track in the browser when its CDN permits
+  // CORS. This keeps large binary messages out of extension-worker IPC.
+  async function fetchArrayBuffer(raw) {
+    const url = trustedURL(raw);
+    if (!url) throw new Error("Unsupported track URL");
+    if (typeof fetch !== "function" || typeof AbortController !== "function") return gmFetch(url, "arraybuffer");
+    const ctl = new AbortController();
+    let timer;
+    const arm = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), CDN_IDLE_MS); };
+    arm();
+    try {
+      logger("Reading offered DASH track", new URL(url).hostname);
+      const res = await fetch(url, {mode:"cors", credentials:"omit", redirect:"manual", signal:ctl.signal});
+      if (res.type === "opaqueredirect") throw Object.assign(new Error("Refused a media redirect"), {stopLookup:true});
+      if (!res.ok) throw mediaStatusError(res.status);
+      validateMediaType(res.headers.get("content-type"));
+      const limit = MAX_TRACK_BYTES;
+      if (+res.headers.get("content-length") > limit) throw new Error("DASH track too large");
+      if (res.status === 206) {
+        const range = /^bytes 0-(\d+)\/(\d+)$/.exec(res.headers.get("content-range") || "");
+        if (!range || Number(range[1])+1 !== Number(range[2])) throw new Error("Incomplete DASH track");
+      }
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No readable track data");
+      let total = 0;
+      const chunks = [];
+      for (;;) {
+        const {done,value} = await reader.read();
+        if (done) break;
+        if (!value?.byteLength) continue;
+        arm(); total += value.byteLength;
+        if (total > limit) throw new Error("DASH track too large");
+        chunks.push(value);
+      }
+      if (!total) throw new Error("Empty DASH track");
+      logger("Read complete DASH track", total);
+      return new Blob(chunks).arrayBuffer();
+    } finally { clearTimeout(timer); ctl.abort(); }
   }
 
   function managerDownload(url, name) {
@@ -676,8 +718,11 @@
       let merged;
       try {
         const [v, a] = await Promise.all([fetchArrayBuffer(video.url), fetchArrayBuffer(audio.url)]);
+        logger("Merging downloaded audio and video");
         merged = new Blob([await muxDashVideoAudioToMp4(v, a)], { type: "video/mp4" });
+        logger("Merged MP4", merged.size);
       } catch (e) {
+        if (e.stopLookup) throw e;
         logger("DASH unavailable; trying offered progressive media", e.message);
         return false;
       }
