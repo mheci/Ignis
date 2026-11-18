@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name               IGNIS — Instagram Enhancement Suite
-// @version            1.0.0
+// @version            1.0.1
 // @description        IGNIS: high-quality downloads (posts, reels, stories, highlights, HD avatars, DASH video+audio MP4 mux, captions, EXIF), tagged-profile lookup, IndexedDB caches, local statistics, and a rebuilt interface.
 // @author             IGNIS
-// @match              https://*.instagram.com/*
+// @match              https://www.instagram.com/*
+// @match              https://instagram.com/*
 // @downloadURL        https://github.com/mheci/Ignis/releases/latest/download/ignis.user.js
 // @updateURL          https://github.com/mheci/Ignis/releases/latest/download/ignis.user.js
-// @require            https://code.jquery.com/jquery-4.0.0.min.js
-// @require            https://cdn.jsdelivr.net/npm/mediabunny@1.34.5/dist/bundles/mediabunny.min.cjs
+// @require            https://code.jquery.com/jquery-4.0.0.min.js#sha256=39a546ea9ad97f8bfaf5d3e0e8f8556adb415e470e59007ada9759dce472adaa
+// @require            https://cdn.jsdelivr.net/npm/mediabunny@1.34.5/dist/bundles/mediabunny.min.cjs#sha256=c14151fb1d9b0efa6a80c0151b2d82bc6bd42f28d31af1b2e145009bcada7b95
 // @grant              GM_addStyle
 // @grant              GM_download
 // @grant              GM_deleteValue
@@ -16,83 +17,55 @@
 // @grant              GM_registerMenuCommand
 // @grant              GM_setValue
 // @grant              GM_unregisterMenuCommand
-// @grant              unsafeWindow
+// @grant              GM_openInTab
 // @grant              GM_xmlhttpRequest
-// @connect            *
-// @icon               https://www.google.com/s2/favicons?domain=www.instagram.com&sz=32
+// @grant              GM.getValue
+// @grant              GM.setValue
+// @grant              GM.deleteValue
+// @grant              GM.download
+// @grant              GM.openInTab
+// @grant              GM.notification
+// @grant              GM.registerMenuCommand
+// @grant              GM.unregisterMenuCommand
+// @grant              GM.xmlHttpRequest
+// @connect            instagram.com
+// @connect            cdninstagram.com
+// @connect            fbcdn.net
+// @noframes
 // @license            GPL-3.0-only
 // @compatible         chrome >= 100
 // @compatible         edge >= 100
 // @compatible         firefox >= 100
-// @run-at             document-start
+// @run-at             document-end
 // ==/UserScript==
-(function () {
+// Managers may concatenate @requires without semicolons. Mediabunny ends
+// with a conditional CommonJS export; do not let it capture our IIFE.
+;(function () {
   "use strict";
 
-  const VERSION = "1.0.0";
+  const VERSION = "__IGNIS_VERSION__";
   const NAME = "IGNIS";
   const $ = jQuery;
 
-  // Neutralize tab-focus stealing: when a media page (reel / image) loads in
-  // a background tab, Instagram's page scripts call window.focus(), which
-  // brings the tab to the front in Firefox. We run at document-start (before
-  // Instagram's JS) and only honor focus() when this tab already has focus.
-  var __ignisFocusTarget = (typeof unsafeWindow !== "undefined" && unsafeWindow) || window;
-  var __ignisNativeFocus = null;
-  try {
-    __ignisNativeFocus = __ignisFocusTarget.focus.bind(__ignisFocusTarget);
-    var __ignisGuardedFocus = function () {
-      try {
-        if (!document.hasFocus()) return;
-      } catch (e) {}
-      return __ignisNativeFocus.apply(__ignisFocusTarget, arguments);
-    };
-    window.focus = __ignisGuardedFocus;
-    __ignisFocusTarget.focus = __ignisGuardedFocus;
-  } catch (e) {}
-
-  // SPA navigation detection without polling: we run at document-start, so
-  // wrapping history.pushState/replaceState here catches every client-side
-  // route change Instagram makes. popstate/hashchange cover the rest. The
-  // handler is injected later by Router.start(); pre-boot navigations are
-  // simply picked up by the initial enter().
+  // Navigation events cover history changes in the page's own realm. On older
+  // browsers the DOM observer also compares location.href after site renders.
   var __ignisOnNavigate = null;
   function __ignisHandleNavigate() {
-    if (typeof __ignisOnNavigate !== "function") return;
-    try {
-      __ignisOnNavigate();
-    } catch (e) {
-      /* navigation hook must never break the page */
-    }
-  }
-  try {
-    var __ignisPushState = history.pushState;
-    var __ignisReplaceState = history.replaceState;
-    history.pushState = function () {
-      var r = __ignisPushState.apply(this, arguments);
-      __ignisHandleNavigate();
-      return r;
-    };
-    history.replaceState = function () {
-      var r = __ignisReplaceState.apply(this, arguments);
-      __ignisHandleNavigate();
-      return r;
-    };
-  } catch (e) {
-    /* history frozen (rare hardened sandboxes): boot still scans once */
+    __ignisOnNavigate?.();
   }
   window.addEventListener("popstate", __ignisHandleNavigate);
   window.addEventListener("hashchange", __ignisHandleNavigate);
+  window.navigation?.addEventListener("currententrychange", __ignisHandleNavigate);
 
   // ─── Settings catalog [key, category, label, description, default] ─────
   const SETTINGS = [
-    ["AUTO_RENAME", "download", "Auto Rename Files", "Auto-renames downloaded files. Right-click the row to edit the template.", true],
+    ["AUTO_RENAME", "download", "Auto Rename Files", "Auto-renames downloaded files. Click the label to edit the template.", true],
     ["RENAME_PUBLISH_DATE", "download", "Use Publish Date in Filename", "Uses the post publish date instead of the download time.", true],
-    ["CAPTURE_IMAGE_VIA_MEDIA_CACHE", "download", "Capture Images via Cache", "Captures high-quality image URLs from the page's resource cache.", true],
-    ["DOWNLOAD_ORIGINAL_QUALITY", "download", "Download Original Quality", "Strips size constraints from CDN URLs to get the original file.", true],
-    ["FORCE_RESOURCE_VIA_MEDIA", "download", "Fetch via Media API", "Fetches resources via the Media API for the highest quality.", true],
-    ["PREFER_DASH_MANIFEST", "download", "Prefer DASH Manifest", "Downloads separate highest-quality video + audio DASH streams and merges them.", true],
-    ["FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED", "download", "Fallback if API Throttled", "Falls back to direct links when the Media API is rate-limited.", true],
+    ["CAPTURE_IMAGE_VIA_MEDIA_CACHE", "download", "Capture Images via Cache", "Keeps recently seen image URLs as fallbacks for missing or expired downloads.", true],
+    ["DOWNLOAD_ORIGINAL_QUALITY", "download", "Download Original Quality", "Uses the largest image variant actually offered by the page; signed URLs are not modified.", true],
+    ["FORCE_RESOURCE_VIA_MEDIA", "download", "Fetch via Media API", "Allows optional metadata lookups for complete media lists and DASH. Turn off for page-only post extraction.", true],
+    ["PREFER_DASH_MANIFEST", "download", "Prefer DASH Manifest", "Merges supported, complete MP4 video and audio tracks; otherwise uses the offered progressive file.", true],
+    ["FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED", "download", "Use Offered Story Link on API Failure", "Uses a link already provided for this story if the optional quality lookup fails or is rate-limited. Does not retry access denials.", true],
     ["MODIFY_RESOURCE_EXIF", "download", "Add EXIF Metadata", "Adds post URL, date and author to image EXIF.", true],
     ["DOWNLOAD_WITH_CAPTION", "download", "Download with Caption (.txt)", "Also saves the post caption as a .txt file alongside the media.", false],
     ["DIRECT_DOWNLOAD_ALL", "download", "Direct Download All", "Downloads every item of a post immediately, without a dialog.", false],
@@ -155,7 +128,6 @@
     [USER_ID_CACHE_KEY]: "GL_userIdCache",
   };
 
-  const HASTE_BITMAP_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
 
   const SVG = {
     DOWNLOAD: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>',
@@ -201,11 +173,10 @@
     postPoll: null,
     homepageObserverDebounce: null,
     GL_storyConfirmSkipped: false,
-    GL_dataCache: { stories: {}, highlights: {}, posts: {}, taggedProfiles: {} },
-    GL_payloadCache: {},
+    GL_dataCache: { stories: Object.create(null), highlights: Object.create(null) },
+    GL_payloadCache: Object.create(null),
     GL_imageCache: {},
     GL_userIdCache: {},
-    GL_mediaDataCache: {},
     busy: 0,
     _igTab: "download",
     settingsHotkeyKeyCode: 87,
@@ -215,27 +186,83 @@
   };
 
   // ─── Storage (crash-safe) ──────────────────────────────────────────────
+  const modernGM=typeof GM === "undefined" ? {} : GM;
+  const manager = {
+    xhr: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : modernGM.xmlHttpRequest?.bind(modernGM),
+    download: typeof GM_download === "function" ? GM_download : modernGM.download?.bind(modernGM),
+    open: typeof GM_openInTab === "function" ? GM_openInTab : modernGM.openInTab?.bind(modernGM),
+    notify: typeof GM_notification === "function" ? GM_notification : modernGM.notification?.bind(modernGM),
+    menu:
+      typeof GM_registerMenuCommand === "function"
+        ? GM_registerMenuCommand
+        : modernGM.registerMenuCommand?.bind(modernGM),
+    unmenu:
+      typeof GM_unregisterMenuCommand === "function"
+        ? GM_unregisterMenuCommand
+        : modernGM.unregisterMenuCommand?.bind(modernGM)
+  };
   const Store = {
+    snapshot: new Map(),
+    async warm() {
+      if (typeof GM_getValue === "function" || !modernGM.getValue) return;
+      const keys = [
+        ...Object.keys(USER_SETTING),
+        STATS_KEY,
+        IMAGE_CACHE_KEY,
+        USER_ID_CACHE_KEY,
+        "G_RENAME_FORMAT",
+        "G_HOTKEY_SETTINGS_KEYCODE",
+        "G_HOTKEY_DEBUG_KEYCODE",
+        "G_HOTKEY_DOWNLOAD_STORY_KEYCODE",
+        "G_HOTKEY_DOWNLOADSTORY_KEYCODE"
+      ];
+      await Promise.all(
+        keys.map(async (k) => {
+          try {
+            const v = await modernGM.getValue(k);
+            if (v !== undefined) this.snapshot.set(k, v);
+          } catch (_) {
+            /* memory-only */
+          }
+        })
+      );
+    },
     get(key, fallback) {
       try {
-        const v = GM_getValue(key, fallback);
+        const v = typeof GM_getValue === "function" ? GM_getValue(key, fallback) : this.snapshot.get(key);
         return v === undefined ? fallback : v;
-      } catch (e) {
+      } catch (_) {
         return fallback;
       }
     },
+    write(key, value) {
+      if (typeof GM_setValue === "function") return GM_setValue(key, value);
+      this.snapshot.set(key, value);
+      if (!modernGM.setValue) throw new Error("Manager storage unavailable");
+      return modernGM.setValue(key, value);
+    },
     set(key, value) {
       try {
-        GM_setValue(key, value);
-      } catch (e) {
-        /* storage full or disabled */
+        Promise.resolve(this.write(key, value)).catch(() => {});
+      } catch (_) {
+        /* session settings still work */
+      }
+    },
+    async remove(key) {
+      try {
+        if (typeof GM_deleteValue === "function") await GM_deleteValue(key);
+        else if (modernGM.deleteValue) await modernGM.deleteValue(key);
+        else await this.write(key, {});
+        this.snapshot.delete(key);
+      } catch (_) {
+        /* keep the original until durable migration succeeds */
       }
     },
     loadImageCache() {
       const raw = this.get(IMAGE_CACHE_KEY, {});
       if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw;
       return {};
-    },
+    }
   };
 
   // ─── Download statistics (local-only) ──────────────────────────────────
@@ -248,7 +275,21 @@
     _load() {
       if (!this._data) {
         var d = Store.get(STATS_KEY, null);
-        this._data = d && typeof d === "object" && d.v === 1 && d.byType && d.byDay ? d : this._blank();
+        const clean = this._blank(),
+          count = (n) => (Number.isSafeInteger(n) && n >= 0 ? n : 0);
+        if (d?.v === 1) {
+          for (const key of ["sessions", "bytes", "items", "lastAt"]) clean[key] = count(d[key]);
+          clean.firstDay = count(d.firstDay) || clean.firstDay;
+          for (const [k, v] of Object.entries(d.byType || {}))
+            if (/^(photo|video|post|reels|stories|highlights|thumbnail|avatar|caption|other)$/.test(k))
+              clean.byType[k] = count(v);
+          for (const k of Object.keys(d.byDay || {})
+            .filter((k) => /^\d{4}-\d\d-\d\d$/.test(k))
+            .sort()
+            .slice(-90))
+            clean.byDay[k] = count(d.byDay[k]);
+        }
+        this._data = clean;
       }
       return this._data;
     },
@@ -260,6 +301,7 @@
       }
     },
     session() {
+      if (!USER_SETTING.TRACK_DOWNLOAD_STATS) return;
       var d = this._load();
       d.sessions++;
       this._save();
@@ -286,7 +328,7 @@
     reset() {
       this._data = this._blank();
       this._save();
-    },
+    }
   };
 
   // ─── Logging ───────────────────────────────────────────────────────────
@@ -319,18 +361,25 @@
   }
 
   function normTs(ts) {
-    if (ts == null || isNaN(ts)) return Math.floor(Date.now() / 1000);
+    if (ts == null || !Number.isFinite(Number(ts)) || Number(ts) <= 0) return Math.floor(Date.now() / 1000);
     ts = Number(ts);
-    return ts > 1e12 ? Math.floor(ts / 1000) : Math.floor(ts);
+    return ts > 1e11 ? Math.floor(ts / 1000) : Math.floor(ts);
   }
 
   function sanitizeFilename(name) {
-    return String(name == null ? "" : name)
+    let stem = String(name == null ? "" : name)
       .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
       .replace(/[. ]+$/g, "")
       .replace(/\s+/g, " ")
       .trim()
-      .slice(0, 180);
+      .slice(0, 180)
+      .replace(/[\u202a-\u202e\u2066-\u2069]/g, "")
+      .replace(/[. ]+$/g, "");
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)) stem = "_" + stem;
+    // Leave space for the extension even on byte-limited filesystems.
+    const enc = new TextEncoder();
+    while (enc.encode(stem).length > 220) stem = Array.from(stem).slice(0, -1).join("");
+    return stem;
   }
 
   function isMacOS() {
@@ -342,25 +391,76 @@
   }
 
   function makeButton(icon, title, cls) {
-    return $(
-      '<div class="' + cls + '" role="button" tabindex="0" aria-label="' + esc(title) + '" title="' + esc(title) + '">' + icon + "</div>"
-    );
+    return $('<button type="button">').addClass(cls).attr({ "aria-label": title, title: title }).html(icon);
+  }
+
+  // Validate the authority but return the original signed URL, not a serialized rewrite.
+  function trustedURL(raw, media = true) {
+    if (typeof raw !== "string") return null;
+    const value = raw.trim();
+    try {
+      const u = new URL(value);
+      const domains = media ? ["instagram.com", "cdninstagram.com", "fbcdn.net"] : ["instagram.com"];
+      if (
+        u.protocol !== "https:" ||
+        u.username ||
+        u.password ||
+        u.port ||
+        !domains.some((d) => u.hostname === d || u.hostname.endsWith("." + d))
+      )
+        return null;
+      return value;
+    } catch (_) {
+      return null;
+    }
   }
 
   function openNewTab(link) {
-    if (!link) return;
-    var a = document.createElement("a");
-    a.href = link;
+    const href = trustedURL(link);
+    if (!href) {
+      Toasts.error("No supported media link is available.");
+      return false;
+    }
+    if (manager.open) {
+      try {
+        Promise.resolve(manager.open(href, { active: false, insert: true })).catch(() =>
+          Toasts.error("Could not open the media tab.")
+        );
+        return true;
+      } catch (_) {
+        /* Use the native link below. */
+      }
+    }
+    const a = document.createElement("a");
+    a.href = href;
     a.target = "_blank";
-    a.rel = "noopener";
+    a.rel = "noopener noreferrer";
     document.body.appendChild(a);
     a.click();
     a.remove();
+    return true;
+  }
+
+  function postCode(href) {
+    try {
+      const u = new URL(href || "", location.href);
+      if (!href || !trustedURL(u.href, false)) return null;
+      return u.pathname.match(/^\/(?:[a-zA-Z0-9_.]+\/)?(?:p|reel|reels)\/([A-Za-z0-9_-]{1,32})\/?$/)?.[1] || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function positionHost(el) {
+    if (el && getComputedStyle(el).position === "static") el.classList.add("ignis-position-host");
   }
 
   // ─── Username extraction (multi-strategy) ──────────────────────────────
   function cleanName(t) {
-    t = (t || "").replace(/^@/, "").trim().toLowerCase();
+    t = String(t ?? "")
+      .replace(/^@/, "")
+      .trim()
+      .toLowerCase();
     return /^[a-zA-Z0-9_.]{1,30}$/.test(t) ? t : null;
   }
 
@@ -454,7 +554,7 @@
       })
       .first()
       .attr("href");
-    var u = cleanName(name);
+    var u = cleanName((name || "").split("/").filter(Boolean)[0]);
     if (u) return u;
 
     name = $('body > div section:visible header a[href^="/"]')
@@ -471,92 +571,32 @@
     return getStoryUsername();
   }
 
-  // ─── Candidate sorting (non-mutating) ──────────────────────────────────
-  function sortCandidatesDescending(candidates, widthKey, stpKey) {
-    if (!Array.isArray(candidates)) return candidates || [];
-    return candidates
-      .map(function (c) {
-        return c;
-      })
-      .sort(function (a, b) {
-        if (stpKey) {
-          var aStp = "",
-            bStp = "";
-          try {
-            aStp = new URL(a.url || a.src).searchParams.get("stp") || "";
-            bStp = new URL(b.url || b.src).searchParams.get("stp") || "";
-          } catch (e) {
-            /* ignore */
-          }
-          if (aStp && bStp && aStp.length !== bStp.length) return bStp.length - aStp.length;
-        }
-        var aW = a[widthKey] || a.config_width || 0;
-        var bW = b[widthKey] || b.config_width || 0;
-        return bW - aW;
-      });
-  }
-
   // ─── Story container detection ─────────────────────────────────────────
   function findStoryContainer() {
-    if ($("body > div section._ac0a").length > 0) {
-      return $("body > div section:visible._ac0a");
-    }
-    var $c = $("body > div section:visible > div > div[style]:not([class])");
-    if ($c.length) {
-      $c.css("position", "relative");
-      return $c;
-    }
-    var $mount = $('div[id^="mount"] section > div > a[href="/"]');
-    if ($mount.length) {
-      var $d = $mount
-        .parent()
-        .parent()
-        .parent()
-        .find("section:visible > div > div[style]:not([class])");
-      if ($d.length) {
-        $d.css("position", "relative");
-        return $d;
-      }
-      var $e = $mount
-        .parent()
-        .parent()
-        .parent()
-        .find(
-          'section:visible > div div[style]:not([class]) > div:not([data-visualcompletion="loading-state"])'
-        );
-      if ($e.length) {
-        $e.css("position", "relative");
-        return $e;
-      }
-      var $f = $mount.parents("section:visible").find("div[style]:not([class])");
-      if ($f.length) {
-        $f.css("position", "relative");
-        return $f;
-      }
-    }
-    var $g = $(
-      "body > div div:not([hidden]) section:visible > div div[class][style] > div[style]:not([class])"
-    );
-    if ($g.length) {
-      var best = null,
-        bestW = -1;
-      $g.each(function () {
-        var w = $(this).width();
-        if (w > bestW) {
-          bestW = w;
-          best = $(this);
-        }
-      });
-      if (best) return best.children("div").first();
-    }
-    return null;
+    // Instagram may keep adjacent stories mounted. Only add controls to the
+    // on-screen section nearest the viewport centre, not every matching node.
+    const sections = Array.from(document.querySelectorAll("section")).filter((s) => s.querySelector("video, img"));
+    const ranked = sections
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        return {
+          el,
+          area:
+            Math.max(0, Math.min(innerWidth, r.right) - Math.max(0, r.left)) *
+            Math.max(0, Math.min(innerHeight, r.bottom) - Math.max(0, r.top)),
+          distance: Math.abs(r.left + r.right - innerWidth)
+        };
+      })
+      .filter((s) => s.area > 0)
+      .sort((a, b) => a.distance - b.distance || b.area - a.area);
+    return $(ranked[0]?.el || []);
   }
 
   // ─── Loading bar / progress helpers ────────────────────────────────────
   function updateLoadingBar(isLoading) {
     state.busy = Math.max(0, state.busy + (isLoading ? 1 : -1));
     if (state.busy > 0) Progress.show();
-    else Progress.hide();
+    else if (!state.batchActive) Progress.hide();
   }
 
   // ─── Toast + notification system ───────────────────────────────────────
@@ -618,7 +658,8 @@
 
   function notify(title, text) {
     try {
-      GM_notification({ title: title, text: text || "", timeout: 5000 });
+      if (!manager.notify) throw Error("No manager notifications");
+      Promise.resolve(manager.notify({ title, text: text || "", timeout: 5000 })).catch(() => Toasts.info(text));
     } catch (e) {
       Toasts.info((title || "") + (text ? " — " + text : ""));
     }
@@ -645,17 +686,13 @@
         ensure().classList.add("ignis-progress-on");
       },
       hide: function () {
-        if (el) el.classList.remove("ignis-progress-on");
+        if (el) {el.classList.remove("ignis-progress-on"); label.textContent="";}
       },
       set: function (now, total) {
         ensure();
         label.textContent = now + "/" + total;
         this.show();
-        if (now >= total) {
-          setTimeout(function () {
-            Progress.hide();
-          }, 700);
-        }
+
       },
     };
   })();
@@ -671,13 +708,16 @@
     var hotkeys = [
       ["G_HOTKEY_SETTINGS_KEYCODE", "settingsHotkeyKeyCode"],
       ["G_HOTKEY_DEBUG_KEYCODE", "debugHotkeyKeyCode"],
-      ["G_HOTKEY_DOWNLOAD_STORY_KEYCODE", "downloadStoryHotkeyKeyCode"],
+      ["G_HOTKEY_DOWNLOAD_STORY_KEYCODE", "downloadStoryHotkeyKeyCode"]
     ];
     hotkeys.forEach(function (pair) {
-      var v = Store.get(pair[0], null);
-      if (typeof v === "number") state[pair[1]] = v;
+      var v = Store.get(
+        pair[0],
+        pair[1] === "downloadStoryHotkeyKeyCode" ? Store.get("G_HOTKEY_DOWNLOADSTORY_KEYCODE", null) : null
+      );
+      if (Number.isInteger(v) && v >= 65 && v <= 90) state[pair[1]] = v;
     });
-    state.GL_imageCache = Store.loadImageCache();
+    state.GL_imageCache = mergeCacheEntries(IMAGE_CACHE_KEY, Store.loadImageCache());
     var cachedIds = Store.get(USER_ID_CACHE_KEY, null);
-    state.GL_userIdCache = cachedIds && typeof cachedIds === "object" && !Array.isArray(cachedIds) ? cachedIds : {};
+    state.GL_userIdCache = mergeCacheEntries(USER_ID_CACHE_KEY, cachedIds);
   }

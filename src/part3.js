@@ -2,174 +2,200 @@
      Ignis Forge — download engine
      ============================================================ */
 
-  function gmFetch(url, responseType) {
-    return new Promise(function (resolve, reject) {
-      GM_xmlhttpRequest({
+  function gmFetch(raw, responseType) {
+    const url = trustedURL(raw);
+    if (!url) return Promise.reject(new Error("Unsupported media link"));
+    if (!manager.xhr) return Promise.reject(new Error("This userscript manager cannot fetch media"));
+    return new Promise((resolve, reject) => {
+      let handle;
+      const limit = 128 * 1024 * 1024;
+      const opts = {
         method: "GET",
-        url: url,
-        responseType: responseType,
+        url,
+        responseType,
+        anonymous: true,
+        redirect: "error",
         timeout: 60000,
-        onload: function (res) {
-          if (res.status < 200 || res.status >= 300) {
-            reject(new Error("HTTP " + res.status));
-            return;
+        onprogress(ev) {
+          if (responseType === "arraybuffer" && Math.max(ev.total || 0, ev.loaded || 0) > limit) {
+            reject(new Error("DASH track is too large for in-memory merging"));
+            handle?.abort?.();
           }
-          var hdrs = String(res.responseHeaders || "").toLowerCase();
-          if (/text\/html|application\/json/i.test(hdrs)) {
-            reject(new Error("Server returned a web page instead of media"));
-            return;
-          }
+        },
+        onload(res) {
+          if (res.status < 200 || res.status >= 300)
+            return reject(
+              Object.assign(new Error("Media returned HTTP " + res.status), {
+                canTryAlternate: res.status === 404 || res.status === 410
+              })
+            );
+          if (!trustedURL(res.finalUrl || url)) return reject(new Error("Unsupported media redirect"));
+          const type =
+            /^content-type:\s*([^;\r\n]+)/im.exec(res.responseHeaders || "")?.[1] || res.response?.type || "";
+          if (
+            type &&
+            !/^(image\/(?:jpe?g|webp|avif|png|gif)|(?:video|audio)\/[\w.+-]+|application\/(?:octet-stream|mp4|binary))$/i.test(
+              type.trim()
+            )
+          )
+            return reject(new Error("Server did not return media"));
+          if (!(res.response?.size > 0 || res.response?.byteLength > 0))
+            return reject(new Error("Empty media response"));
+          if (responseType === "arraybuffer" && res.response.byteLength > limit)
+            return reject(new Error("DASH track is too large for in-memory merging"));
           resolve(res.response);
         },
-        onerror: function () {
-          reject(new Error("Network error"));
-        },
-        ontimeout: function () {
-          reject(new Error("Download timed out"));
-        },
-      });
+        onerror: () => reject(Object.assign(new Error("Media request failed"), { canTryAlternate: true })),
+        ontimeout: () => reject(Object.assign(new Error("Media request timed out"), { canTryAlternate: true })),
+        onabort: () => reject(new Error("Media request cancelled"))
+      };
+      handle = manager.xhr(opts);
+      // Promise-only managers need not call the legacy callbacks.
+      if (handle?.then)
+        handle.then((r) => {
+          if (r) opts.onload(r);
+        }, reject);
     });
   }
-
-  function fetchMediaBlob(url) {
-    return gmFetch(url, "blob").then(function (blob) {
-      return { blob: blob, isWeb: false };
-    });
-  }
-
   function fetchArrayBuffer(url) {
-    updateLoadingBar(true);
-    return gmFetch(url, "arraybuffer").finally(function () {
-      updateLoadingBar(false);
+    return gmFetch(url, "arraybuffer");
+  }
+
+  function managerDownload(url, name) {
+    return new Promise((resolve, reject) => {
+      let handle,
+        done = false;
+      const finish = (err) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        err ? reject(err) : resolve();
+      };
+      const timer = setTimeout(() => {
+        finish(new Error("Download manager timed out"));
+        try {
+          handle?.abort?.();
+        } catch (_) {}
+      }, 120000);
+      try {
+        handle = manager.download({
+          url,
+          name,
+          timeout: 120000,
+          onload: () => finish(),
+          onerror: () => finish(new Error("Download manager rejected the file")),
+          onabort: () => finish(new Error("Download cancelled")),
+          ontimeout: () => finish(new Error("Download manager timed out"))
+        });
+        if (handle?.then)
+          handle.then(
+            () => finish(),
+            (e) => finish(e || new Error("Download failed"))
+          );
+      } catch (e) {
+        finish(e);
+      }
     });
   }
 
-  function saveFiles(downloadLink, metadata) {
-    return new Promise(function (resolve) {
-      updateLoadingBar(true);
-      var uidPromise =
-        metadata.uid == null && metadata.username && metadata.username !== "NONE"
-          ? getUserId(metadata.username)
-              .then(function (info) {
-                return (info && info.user && (info.user.id || info.user.pk)) || null;
-              })
-              .catch(function () {
-                return null;
-              })
-          : Promise.resolve(metadata.uid != null ? metadata.uid : null);
-      var filetype = metadata.filetype || "jpg";
-      var wantExif =
+  function needsUID(meta) {
+    return (
+      meta.uid == null &&
+      USER_SETTING.AUTO_RENAME &&
+      /%UID%/i.test(state.fileRenameFormat) &&
+      cleanName(meta.username) &&
+      meta.username !== "NONE"
+    );
+  }
+  async function resolveFilenameUID(meta) {
+    if (!needsUID(meta)) return meta;
+    try {
+      const info = await getUserId(meta.username);
+      return { ...meta, uid: info.user?.id || info.user?.pk };
+    } catch (_) {
+      return meta;
+    } // An optional filename token must not block an offered file.
+  }
+  async function saveFiles(raw, metadata, alternate) {
+    updateLoadingBar(true);
+    try {
+      let url = trustedURL(raw);
+      if (!url) throw new Error("Unsupported media link");
+      const meta = { ...(await resolveFilenameUID(metadata)) };
+      const ext = mediaExtension(url, meta.filetype || "jpg");
+      meta.filetype = ext;
+      const exif =
         USER_SETTING.MODIFY_RESOURCE_EXIF &&
-        filetype === "jpg" &&
-        metadata.shortcode &&
-        metadata.sourceType === "photo";
-      var wantCaption = USER_SETTING.DOWNLOAD_WITH_CAPTION && metadata.caption;
+        meta.sourceType === "photo" &&
+        meta.shortcode &&
+        /^(jpg|webp)$/.test(ext);
       if (
         USER_SETTING.USE_EXTERNAL_DOWNLOAD_MODE &&
-        !wantExif &&
-        !wantCaption &&
-        typeof GM_download === "function"
+        manager.download &&
+        !exif &&
+        !(USER_SETTING.DOWNLOAD_WITH_CAPTION && meta.caption)
       ) {
+        await managerDownload(url, getSaveFileName(url, meta));
+        Stats.record(meta.sourceType, 0);
+      } else {
+        let blob;
         try {
-          GM_download({
-            url: downloadLink,
-            name: getSaveFileName(downloadLink, metadata),
-            onload: function () {
-              Stats.record(metadata.sourceType, 0);
-              updateLoadingBar(false);
-              resolve(true);
-            },
-            onerror: function () {
-              updateLoadingBar(false);
-              resolve(false);
-            },
-          });
+          blob = await gmFetch(url, "blob");
         } catch (e) {
-          updateLoadingBar(false);
-          resolve(false);
+          // Retry only an asset retrieval, never a cancelled or rejected handoff.
+          if (!e.canTryAlternate || !trustedURL(alternate) || alternate === url) throw e;
+          url = alternate;
+          blob = await gmFetch(url, "blob");
         }
-        return;
+        await createSaveFileElement(url, blob, meta);
       }
-      fetchMediaBlob(downloadLink)
-        .then(function (r) {
-          if (r.isWeb) throw new Error("Server returned a web page instead of media");
-          return uidPromise.then(function (uid) {
-            metadata.uid = uid;
-            return r.blob;
-          });
-        })
-        .then(function (blob) {
-          return createSaveFileElement(downloadLink, blob, metadata);
-        })
-        .then(function () {
-          updateLoadingBar(false);
-          resolve(true);
-        })
-        .catch(function (err) {
-          updateLoadingBar(false);
-          logger("saveFiles failed:", err && err.message ? err.message : err);
-          Toasts.error("Download failed: " + ((err && err.message) || "unknown error"));
-          resolve(false);
-        });
-    });
+      return true;
+    } catch (err) {
+      logger("Save failed", err.message);
+      Toasts.error("Download failed: " + err.message);
+      return false;
+    } finally {
+      updateLoadingBar(false);
+    }
   }
 
-  function triggerDownload(blob, filename) {
-    return new Promise(function (resolve) {
-      var url = URL.createObjectURL(blob);
-      if (USER_SETTING.USE_EXTERNAL_DOWNLOAD_MODE && typeof GM_download === "function") {
-        GM_download({
-          url: url,
-          name: filename,
-          onload: function () {
-            URL.revokeObjectURL(url);
-            resolve();
-          },
-          onerror: function () {
-            URL.revokeObjectURL(url);
-            resolve();
-          },
-        });
-        return;
+  async function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    if (USER_SETTING.USE_EXTERNAL_DOWNLOAD_MODE && manager.download) {
+      try {
+        await managerDownload(url, filename);
+      } finally {
+        URL.revokeObjectURL(url);
       }
-      var link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      link.rel = "noopener";
-      link.style.display = "none";
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.rel = "noopener";
+    link.hidden = true;
+    try {
       document.body.appendChild(link);
       link.click();
-      setTimeout(function () {
-        try {
-          document.body.removeChild(link);
-        } catch (e) {
-          /* ignore */
-        }
-        URL.revokeObjectURL(url);
-        resolve();
-      }, 300);
-    });
-  }
-
-  function replaceSameOriginHost(url) {
-    try {
-      var urlObj = new URL(url);
-      urlObj.host = "scontent.cdninstagram.com";
-      return urlObj.href;
-    } catch (e) {
-      return url;
+    } finally {
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
     }
   }
 
   function getSaveFileName(downloadLink, metadata) {
-    var timestamp = normTs(metadata.timestamp);
-    var index = metadata.index != null ? metadata.index : 0;
+    var timestamp = normTs(USER_SETTING.RENAME_PUBLISH_DATE ? metadata.timestamp : Date.now());
+    var index = metadata.index != null ? metadata.index : 1;
     var date = new Date(timestamp * 1000);
     var filetype = metadata.filetype || "jpg";
 
     // Optional: name a video after its thumbnail file, matching the two
     // files when they sit side by side in a download folder.
-    if (USER_SETTING.MATCH_VIDEO_FILENAME_TO_THUMBNAIL && (filetype === "mp4" || filetype === "m4a") && metadata.thumbnailURL) {
+    if (
+      USER_SETTING.MATCH_VIDEO_FILENAME_TO_THUMBNAIL &&
+      (filetype === "mp4" || filetype === "m4a") &&
+      metadata.thumbnailURL
+    ) {
       try {
         var thumbBase = new URL(metadata.thumbnailURL).pathname.split("/").pop().split(".").slice(0, -1).join(".");
         if (thumbBase) return sanitizeFilename((metadata.username || "instagram") + "_" + thumbBase) + "." + filetype;
@@ -202,7 +228,7 @@
       ORIGINAL_NAME: original_name,
       ORIGINAL_NAME_FIRST: original_name.split("_")[0] || original_name,
       INDEX: String(index),
-      UID: metadata.uid != null ? String(metadata.uid) : "",
+      UID: metadata.uid != null ? String(metadata.uid) : ""
     };
     var filename = (state.fileRenameFormat || "").replace(/%([\w\-]+)%/g, function (m, t) {
       var up = t.toUpperCase();
@@ -218,56 +244,55 @@
   }
 
   async function createSaveFileElement(downloadLink, object, metadata) {
-    var filetype = metadata.filetype || "jpg";
-    if (metadata.uid == null && metadata.username && metadata.username !== "NONE") {
+    const mimeExt = {
+      "image/jpeg": "jpg",
+      "image/webp": "webp",
+      "image/png": "png",
+      "image/gif": "gif",
+      "image/avif": "avif",
+      "video/mp4": "mp4",
+      "video/webm": "webm"
+    };
+    metadata = {
+      ...metadata,
+      filetype: mimeExt[object.type?.split(";")[0].toLowerCase()] || metadata.filetype || "jpg"
+    };
+    const name = getSaveFileName(downloadLink, metadata);
+    let blob = object;
+    if (
+      USER_SETTING.MODIFY_RESOURCE_EXIF &&
+      /^(jpg|webp)$/.test(metadata.filetype) &&
+      metadata.shortcode &&
+      metadata.sourceType === "photo"
+    ) {
       try {
-        var userInfo = await getUserId(metadata.username);
-        metadata.uid =
-          (userInfo && userInfo.user && (userInfo.user.id || userInfo.user.pk)) || null;
-      } catch (e) {
-        metadata.uid = null;
+        blob = await changeExifData(object, metadata);
+      } catch (_) {
+        logger("Unsupported image metadata layout; keeping original bytes");
       }
     }
-    var downloadName = getSaveFileName(downloadLink, metadata);
-    if (!metadata.skipMedia) {
-      var wantExif =
-        USER_SETTING.MODIFY_RESOURCE_EXIF &&
-        filetype === "jpg" &&
-        metadata.shortcode &&
-        metadata.sourceType === "photo" &&
-        (object.type === "image/jpeg" || object.type === "image/webp");
-      if (wantExif) {
-        try {
-          var newBlob = await changeExifData(object, metadata);
-          await triggerDownload(newBlob, downloadName);
-        } catch (err) {
-          logger("EXIF attach failed, saving original:", err && err.message ? err.message : err);
-          await triggerDownload(object, downloadName);
-        }
-      } else {
-        await triggerDownload(object, downloadName);
-      }
-      Stats.record(String(metadata.sourceType || "other"), (object && object.size) || 0);
-    }
+    await triggerDownload(blob, name);
+    Stats.record(metadata.sourceType, blob.size);
     if (USER_SETTING.DOWNLOAD_WITH_CAPTION && metadata.caption) {
-      var captionName = getSaveFileName(
-        downloadLink,
-        Object.assign({}, metadata, { filetype: "txt" })
-      );
-      await triggerDownload(
-        new Blob([metadata.caption], { type: "text/plain;charset=utf-8" }),
-        captionName
-      );
-      Stats.record("caption", 0);
+      const caption = new Blob([metadata.caption], { type: "text/plain;charset=utf-8" });
+      try {
+        await triggerDownload(caption, name.replace(/\.[^.]+$/, ".txt"));
+        Stats.record("caption", caption.size);
+      } catch (_) {
+        Toasts.error("Media saved, but the caption could not be saved.");
+      }
     }
   }
 
   // ─── EXIF writer (JPEG APP1 + WebP EXIF chunk) ─────────────────────────
-  function concatBytes(a, b) {
-    var c = new Uint8Array(a.length + b.length);
-    c.set(a, 0);
-    c.set(b, a.length);
-    return c;
+  function concatBytes(...pieces) {
+    const bytes = new Uint8Array(pieces.reduce((n, p) => n + p.length, 0));
+    let offset = 0;
+    for (const piece of pieces) {
+      bytes.set(piece, offset);
+      offset += piece.length;
+    }
+    return bytes;
   }
   function u32le(v) {
     return new Uint8Array([v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255]);
@@ -319,42 +344,49 @@
   }
 
   function buildExifPayload(metadata) {
-    var dateBytes = enc(formatExifDate(metadata.timestamp) + "\0");
-    var artistBytes = enc((metadata.username || "") + "\0");
-    var exifIndex = metadata.index != null && metadata.index > 0 ? metadata.index : 1;
-    var keywordBytes = encUtf16le(
-      "https://www.instagram.com/p/" + (metadata.shortcode || "") + "/?img_index=" + exifIndex + "\0"
-    );
-    var xpCommentBytes = encUtf16le(
-      "https://www.instagram.com/uid/" + (metadata.uid || "unknown") + "\0"
-    );
-    var tiffHeader = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00]);
-    var ifd0 = concatBytes(
+    const index = Math.max(1, Number(metadata.index) || 1);
+    const user = cleanName(metadata.username),
+      artist = enc((user || "") + "\0");
+    const url = encUtf16le(`https://www.instagram.com/p/${metadata.shortcode}/?img_index=${index}\0`);
+    const profile = encUtf16le((user ? `https://www.instagram.com/${user}/` : "Instagram") + "\0");
+    const date = enc(formatExifDate(metadata.timestamp) + "\0");
+    const header = new Uint8Array([0x49, 0x49, 0x2a, 0, 8, 0, 0, 0]);
+    const dirLength = (entries) => 2 + 12 * entries + 4;
+    const exifDir = header.length + dirLength(4),
+      dataStart = exifDir + dirLength(1),
+      blocks = [];
+    let next = dataStart;
+    function entry(tag, type, value) {
+      if (value.length <= 4)
+        return makeIFDEntry(
+          tag,
+          type,
+          value.length,
+          value.reduce((v, b, i) => v + b * 256 ** i, 0)
+        );
+      const pos = next;
+      blocks.push(value);
+      next += value.length;
+      if (next % 2) {
+        blocks.push(new Uint8Array(1));
+        next++;
+      }
+      return makeIFDEntry(tag, type, value.length, pos);
+    }
+    return concatBytes(
+      enc("Exif\0\0"),
+      header,
       u16le(4),
-      concatBytes(
-        concatBytes(
-          concatBytes(
-            makeIFDEntry(0x013b, 2, artistBytes.length, 80),
-            makeIFDEntry(0x8769, 4, 1, 62)
-          ),
-          concatBytes(
-            makeIFDEntry(0x9c9c, 1, xpCommentBytes.length, 80 + artistBytes.length + keywordBytes.length),
-            makeIFDEntry(0x9c9e, 1, keywordBytes.length, 80 + artistBytes.length)
-          )
-        ),
-        u32le(0)
-      )
-    );
-    var exifIfd = concatBytes(
+      entry(0x013b, 2, artist),
+      makeIFDEntry(0x8769, 4, 1, exifDir),
+      entry(0x9c9c, 1, profile),
+      entry(0x9c9e, 1, url),
+      u32le(0),
       u16le(1),
-      concatBytes(
-        makeIFDEntry(0x9003, 2, dateBytes.length, 80 + artistBytes.length + keywordBytes.length + xpCommentBytes.length),
-        u32le(0)
-      )
+      entry(0x9003, 2, date),
+      u32le(0),
+      ...blocks
     );
-    var body = concatBytes(tiffHeader, concatBytes(ifd0, exifIfd));
-    var payload = concatBytes(enc("Exif\0\0"), body);
-    return concatBytes(payload, concatBytes(concatBytes(concatBytes(artistBytes, keywordBytes), xpCommentBytes), dateBytes));
   }
 
   function changeExifData(blob, metadata) {
@@ -363,11 +395,18 @@
       if (buf.length < 12) throw new Error("Not a JPEG or WEBP");
       var isJpeg = buf[0] === 0xff && buf[1] === 0xd8;
       var isWebp =
-        buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
-        buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50;
+        buf[0] === 0x52 &&
+        buf[1] === 0x49 &&
+        buf[2] === 0x46 &&
+        buf[3] === 0x46 &&
+        buf[8] === 0x57 &&
+        buf[9] === 0x45 &&
+        buf[10] === 0x42 &&
+        buf[11] === 0x50;
       if (!isJpeg && !isWebp) throw new Error("Not a JPEG or WEBP");
 
       var data = buildExifPayload(metadata);
+      if (data.length + 2 > 65535) throw new Error("Metadata too large");
 
       if (isJpeg) {
         function app1() {
@@ -421,10 +460,8 @@
             ok = false;
             break;
           }
-          if (m === 0xe1) {
-            i += 2 + len;
-            continue;
-          }
+          // Never discard orientation, camera tags or unrelated APP1/XMP data.
+          if (m === 0xe1 && len >= 8 && [69, 120, 105, 102, 0, 0].every((v, k) => buf[i + 4 + k] === v)) return blob;
           out.push(buf.subarray(i, i + 2 + len));
           i += 2 + len;
         }
@@ -442,45 +479,66 @@
         return new Blob([jpeg], { type: "image/jpeg" });
       }
 
-      var chunks = [];
-      var c = 12;
-      var vp8xIndex = -1;
-      while (c + 8 <= buf.length) {
-        var tag = String.fromCharCode(buf[c], buf[c + 1], buf[c + 2], buf[c + 3]);
-        var size = buf[c + 4] | (buf[c + 5] << 8) | (buf[c + 6] << 16) | (buf[c + 7] << 24);
-        var end = c + 8 + size;
-        if (end > buf.length) break;
-        if (tag === "VP8X") vp8xIndex = chunks.length;
-        if (tag !== "EXIF" && tag !== "XMP ") chunks.push(buf.subarray(c, end));
-        c = end;
+      const dv = new DataView(buffer),
+        chunks = [];
+      if (dv.getUint32(4, true) !== buf.length - 8) throw new Error("Invalid WebP length");
+      let pos = 12,
+        extended = null,
+        simple = null,
+        xmp = -1;
+      while (pos < buf.length) {
+        if (pos + 8 > buf.length) throw new Error("Incomplete WebP chunk");
+        const tag = String.fromCharCode(...buf.subarray(pos, pos + 4)),
+          size = dv.getUint32(pos + 4, true);
+        const end = pos + 8 + size + (size % 2);
+        if (end > buf.length) throw new Error("Incomplete WebP data");
+        if (tag === "EXIF") return blob;
+        const chunk = buf.slice(pos, end);
+        if (tag === "VP8X") {
+          if (size !== 10) throw new Error("Invalid extended header");
+          extended = chunk;
+        }
+        if (tag === "VP8 " || tag === "VP8L") simple = { tag, chunk, size };
+        if (tag === "XMP ") xmp = chunks.length;
+        chunks.push(chunk);
+        pos = end;
       }
-      var padded = data.length % 2 === 1 ? concatBytes(data, new Uint8Array([0])) : data;
-      var hdr = new Uint8Array(8);
-      hdr.set(fourCC("EXIF"), 0);
-      new DataView(hdr.buffer).setUint32(4, padded.length, true);
-      var exifChunk = concatBytes(hdr, padded);
-      if (vp8xIndex > -1) {
-        var vp8x = chunks[vp8xIndex].slice();
-        vp8x[8] |= 0x10;
-        chunks[vp8xIndex] = vp8x;
-        chunks.splice(vp8xIndex + 1, 0, exifChunk);
-      } else {
-        chunks.push(exifChunk);
+      // WebP EXIF is TIFF data. Chunk lengths exclude the even-byte padding.
+      const tiff = data.subarray(6),
+        exif = new Uint8Array(8 + tiff.length + (tiff.length % 2));
+      exif.set(fourCC("EXIF"));
+      exif.set(u32le(tiff.length), 4);
+      exif.set(tiff, 8);
+      chunks.splice(xmp < 0 ? chunks.length : xmp, 0, exif);
+      if (!extended) {
+        if (!simple) throw new Error("Missing WebP image");
+        const { tag, chunk, size } = simple;
+        let width,
+          height,
+          alpha = 0;
+        if (tag === "VP8L" && size >= 5 && chunk[8] === 0x2f) {
+          const bits = new DataView(chunk.buffer).getUint32(9, true);
+          width = 1 + (bits & 0x3fff);
+          height = 1 + ((bits >>> 14) & 0x3fff);
+          alpha = (bits >>> 28) & 1;
+        } else if (tag === "VP8 " && size >= 10 && chunk[11] === 0x9d && chunk[12] === 1 && chunk[13] === 0x2a) {
+          width = (chunk[14] | (chunk[15] << 8)) & 0x3fff;
+          height = (chunk[16] | (chunk[17] << 8)) & 0x3fff;
+        } else throw new Error("Unsupported WebP header");
+        if (!width || !height) throw new Error("Invalid WebP dimensions");
+        extended = new Uint8Array(18);
+        extended.set(fourCC("VP8X"));
+        extended.set(u32le(10), 4);
+        extended[8] = alpha ? 0x10 : 0;
+        extended.set(u32le(width - 1).subarray(0, 3), 12);
+        extended.set(u32le(height - 1).subarray(0, 3), 15);
+        chunks.unshift(extended);
       }
-      var wTotal = 12;
-      chunks.forEach(function (ch) {
-        wTotal += ch.length;
-      });
-      var webp = new Uint8Array(wTotal);
-      webp.set(new Uint8Array([0x52, 0x49, 0x46, 0x46]), 0);
-      webp.set(u32le(wTotal - 8), 4);
-      webp.set(new Uint8Array([0x57, 0x45, 0x42, 0x50]), 8);
-      var wOff = 12;
-      chunks.forEach(function (ch) {
-        webp.set(ch, wOff);
-        wOff += ch.length;
-      });
-      return new Blob([webp], { type: "image/webp" });
+      extended[8] |= 0x08;
+      return new Blob(
+        [fourCC("RIFF"), u32le(4 + chunks.reduce((n, c) => n + c.length, 0)), fourCC("WEBP"), ...chunks],
+        { type: "image/webp" }
+      );
     });
   }
 
@@ -489,7 +547,8 @@
     try {
       if (!mpdXml || typeof mpdXml !== "string") return { video: null, audio: null };
       var xml = new DOMParser().parseFromString(mpdXml, "application/xml");
-      if (xml.querySelector("parsererror")) return { video: null, audio: null };
+      if (xml.querySelector("parsererror, ContentProtection") || xml.querySelectorAll("Period").length !== 1)
+        return { video: null, audio: null };
       var reps = Array.prototype.slice.call(xml.querySelectorAll("Representation"));
       var cands = [];
       reps.forEach(function (rep) {
@@ -498,19 +557,15 @@
         var contentType = (set && set.getAttribute("contentType")) || "";
         var baseUrlEl = rep.querySelector("BaseURL");
         var url = baseUrlEl ? baseUrlEl.textContent : null;
-        if (!url) {
-          var st = rep.querySelector("SegmentTemplate");
-          if (st && st.getAttribute("media")) {
-            url = st
-              .getAttribute("media")
-              .replace(/\$RepresentationID\$/g, rep.getAttribute("id") || "")
-              .replace(/\$Number\$/g, st.getAttribute("startNumber") || "0")
-              .replace(/\$Bandwidth\$/g, rep.getAttribute("bandwidth") || "");
-          }
-        }
-        if (!url) return;
+        // One media segment is not a complete track. Leave segmented or protected manifests alone.
+        if (
+          !trustedURL(url) ||
+          rep.querySelector("SegmentTemplate, SegmentList") ||
+          set?.querySelector(":scope > SegmentTemplate, :scope > SegmentList") ||
+          rep.closest("Period")?.querySelector(":scope > SegmentTemplate, :scope > SegmentList")
+        )
+          return;
         url = url.trim();
-        if (!/^https?:\/\//i.test(url)) return;
         cands.push({
           id: rep.getAttribute("id") || "",
           url: url,
@@ -519,7 +574,7 @@
           codecs: rep.getAttribute("codecs") || (set && set.getAttribute("codecs")) || "",
           bandwidth: parseInt(rep.getAttribute("bandwidth") || "0", 10) || 0,
           width: parseInt(rep.getAttribute("width") || "0", 10) || 0,
-          height: parseInt(rep.getAttribute("height") || "0", 10) || 0,
+          height: parseInt(rep.getAttribute("height") || "0", 10) || 0
         });
       });
       var isVideo = function (c) {
@@ -529,17 +584,13 @@
         return (c.contentType || "").indexOf("audio") > -1 || (c.mimeType || "").indexOf("audio") === 0;
       };
       var video =
-        cands
-          .filter(isVideo)
-          .sort(function (a, b) {
-            return b.height - a.height || b.bandwidth - a.bandwidth || b.width - a.width;
-          })[0] || null;
+        cands.filter(isVideo).sort(function (a, b) {
+          return b.height - a.height || b.bandwidth - a.bandwidth || b.width - a.width;
+        })[0] || null;
       var audio =
-        cands
-          .filter(isAudio)
-          .sort(function (a, b) {
-            return b.bandwidth - a.bandwidth;
-          })[0] || null;
+        cands.filter(isAudio).sort(function (a, b) {
+          return b.bandwidth - a.bandwidth;
+        })[0] || null;
       return { video: video, audio: audio };
     } catch (e) {
       logger("[DASH]", "parse error:", e && e.message ? e.message : e);
@@ -552,124 +603,109 @@
     return (async function () {
       var videoInput = new MB.Input({ formats: [MB.MP4], source: new MB.BufferSource(videoBuf) });
       var audioInput = new MB.Input({ formats: [MB.MP4], source: new MB.BufferSource(audioBuf) });
-      var vTrack = await videoInput.getPrimaryVideoTrack();
-      if (!vTrack || !vTrack.codec) throw new Error("No video track found");
-      var aTrack = await audioInput.getPrimaryAudioTrack();
-      if (!aTrack || !aTrack.codec) throw new Error("No audio track found");
-      var vSink = new MB.EncodedPacketSink(vTrack);
-      var aSink = new MB.EncodedPacketSink(aTrack);
-      var output = new MB.Output({
-        format: new MB.Mp4OutputFormat({ fastStart: "in-memory" }),
-        target: new MB.BufferTarget(),
-      });
-      var vSource = new MB.EncodedVideoPacketSource(vTrack.codec);
-      var aSource = new MB.EncodedAudioPacketSource(aTrack.codec);
-      output.addVideoTrack(vSource, { rotation: vTrack.rotation || 0 });
-      output.addAudioTrack(aSource);
-      await output.start();
-      var vDecoderConfig = await vTrack.getDecoderConfig();
-      var aDecoderConfig = await aTrack.getDecoderConfig();
-      var vMeta = vDecoderConfig ? { decoderConfig: vDecoderConfig } : undefined;
-      var aMeta = aDecoderConfig ? { decoderConfig: aDecoderConfig } : undefined;
-      var vIter = vSink.packets();
-      var aIter = aSink.packets();
-      var vNext = await vIter.next();
-      var aNext = await aIter.next();
-      var vSentMeta = false;
-      var aSentMeta = false;
-      var minTs = Infinity;
-      if (!vNext.done) minTs = Math.min(minTs, vNext.value.timestamp);
-      if (!aNext.done) minTs = Math.min(minTs, aNext.value.timestamp);
-      var tsShift = isFinite(minTs) && minTs < 0 ? -minTs : 0;
-      function adjust(p) {
-        if (!tsShift || typeof p.clone !== "function") return p;
-        return p.clone({ timestamp: p.timestamp + tsShift });
-      }
-      while (!vNext.done || !aNext.done) {
-        var takeVideo = vNext.done ? false : aNext.done ? true : vNext.value.timestamp <= aNext.value.timestamp;
-        if (takeVideo) {
-          await vSource.add(adjust(vNext.value), vSentMeta ? undefined : vMeta);
-          vSentMeta = true;
-          vNext = await vIter.next();
-        } else {
-          await aSource.add(adjust(aNext.value), aSentMeta ? undefined : aMeta);
-          aSentMeta = true;
-          aNext = await aIter.next();
+      let output;
+      try {
+        var vTrack = await videoInput.getPrimaryVideoTrack();
+        if (!vTrack || !vTrack.codec) throw new Error("No video track found");
+        var aTrack = await audioInput.getPrimaryAudioTrack();
+        if (!aTrack || !aTrack.codec) throw new Error("No audio track found");
+        var vSink = new MB.EncodedPacketSink(vTrack);
+        var aSink = new MB.EncodedPacketSink(aTrack);
+        output = new MB.Output({
+          format: new MB.Mp4OutputFormat({ fastStart: "in-memory" }),
+          target: new MB.BufferTarget()
+        });
+        var vSource = new MB.EncodedVideoPacketSource(vTrack.codec);
+        var aSource = new MB.EncodedAudioPacketSource(aTrack.codec);
+        output.addVideoTrack(vSource, { rotation: vTrack.rotation || 0 });
+        output.addAudioTrack(aSource);
+        await output.start();
+        var vDecoderConfig = await vTrack.getDecoderConfig();
+        var aDecoderConfig = await aTrack.getDecoderConfig();
+        var vMeta = vDecoderConfig ? { decoderConfig: vDecoderConfig } : undefined;
+        var aMeta = aDecoderConfig ? { decoderConfig: aDecoderConfig } : undefined;
+        var vIter = vSink.packets();
+        var aIter = aSink.packets();
+        var vNext = await vIter.next();
+        var aNext = await aIter.next();
+        if (vNext.done || aNext.done) throw new Error("Empty DASH track");
+        const shift = Math.max(0, -Math.min(vNext.value.timestamp, aNext.value.timestamp));
+        async function writeTrack(source, iterator, first, metadata) {
+          let next = first;
+          while (!next.done) {
+            const packet = next.value;
+            await source.add(shift ? packet.clone({ timestamp: packet.timestamp + shift }) : packet, metadata);
+            metadata = undefined;
+            next = await iterator.next();
+          }
+          source.close();
         }
+        // Independent pumps respect backpressure even when the streams end at
+        // different times. Awaiting one stalled track before writing the other can deadlock.
+        await Promise.all([writeTrack(vSource, vIter, vNext, vMeta), writeTrack(aSource, aIter, aNext, aMeta)]);
+        await output.finalize();
+        var outBuf = output.target.buffer;
+        if (outBuf instanceof ArrayBuffer) return outBuf;
+        if (outBuf && outBuf.buffer) {
+          return outBuf.buffer.slice(outBuf.byteOffset, outBuf.byteOffset + outBuf.byteLength);
+        }
+        throw new Error("Unexpected output buffer type");
+      } catch (e) {
+        if (output?.state === "started") await output.cancel().catch(() => {});
+        throw e;
+      } finally {
+        videoInput.dispose?.();
+        audioInput.dispose?.();
       }
-      await output.finalize();
-      var outBuf = output.target.buffer;
-      if (outBuf instanceof ArrayBuffer) return outBuf;
-      if (outBuf && outBuf.buffer) {
-        return outBuf.buffer.slice(outBuf.byteOffset, outBuf.byteOffset + outBuf.byteLength);
-      }
-      throw new Error("Unexpected output buffer type");
     })();
   }
 
-  async function downloadDashStreams(videoUrl, audioUrl, meta) {
-    var buffers = await Promise.all([fetchArrayBuffer(videoUrl), fetchArrayBuffer(audioUrl)]);
-    var mergedBuf = await muxDashVideoAudioToMp4(buffers[0], buffers[1]);
-    var merged = new Blob([mergedBuf], { type: "video/mp4" });
-    await createSaveFileElement(videoUrl, merged, meta);
-  }
-
   async function tryDashDownload(mediaItem, meta, isPreview) {
-    try {
-      if (!USER_SETTING.PREFER_DASH_MANIFEST || !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA) return false;
-      if (!mediaItem || !mediaItem.video_dash_manifest) return false;
-      var best = parseDashManifest(mediaItem.video_dash_manifest);
-      var vUrl = best && best.video ? best.video.url : "";
-      if (!vUrl) return false;
-      var aUrl = best && best.audio ? best.audio.url : "";
-      var progressiveUrl = mediaItem.video_versions && mediaItem.video_versions[0] && mediaItem.video_versions[0].url;
-      var thumbnailURL =
-        (mediaItem.image_versions2 && mediaItem.image_versions2.candidates && mediaItem.image_versions2.candidates[0] &&
-          mediaItem.image_versions2.candidates[0].url) ||
-        (mediaItem.display_resources && mediaItem.display_resources[0] && mediaItem.display_resources[0].src) ||
-        mediaItem.display_url ||
-        meta.thumbnailURL;
-      var dashMeta = Object.assign({}, meta, { thumbnailURL: thumbnailURL });
-      if (isPreview) {
-        if (USER_SETTING.NEW_TAB_HIGHEST_VIDEO) {
-          openNewTab(vUrl);
-        } else {
-          openNewTab(progressiveUrl || vUrl);
-        }
-        return true;
-      }
-      if (!aUrl) {
-        await saveFiles(vUrl, Object.assign({}, dashMeta, { filetype: "mp4" }));
-        return true;
-      }
-      await downloadDashStreams(vUrl, aUrl, dashMeta);
-      return true;
-    } catch (e) {
-      logger("[DASH]", "mux failed, using single-file fallback:", e && e.message ? e.message : e);
+    if (
+      !USER_SETTING.PREFER_DASH_MANIFEST ||
+      !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA ||
+      !mediaItem?.video_dash_manifest
+    )
       return false;
+    const { video, audio } = parseDashManifest(mediaItem.video_dash_manifest);
+    if (!video) return false;
+    if (isPreview) return USER_SETTING.NEW_TAB_HIGHEST_VIDEO && openNewTab(video.url);
+    if (!audio) return false; // A progressive MP4 can contain sound; do not silently save a silent track instead.
+    updateLoadingBar(true);
+    try {
+      let merged;
+      try {
+        const [v, a] = await Promise.all([fetchArrayBuffer(video.url), fetchArrayBuffer(audio.url)]);
+        merged = new Blob([await muxDashVideoAudioToMp4(v, a)], { type: "video/mp4" });
+      } catch (e) {
+        logger("DASH unavailable; trying offered progressive media", e.message);
+        return false;
+      }
+      // A failed file handoff is not a demux failure. Do not retry it as a second download.
+      await createSaveFileElement(video.url, merged, { ...(await resolveFilenameUID(meta)), filetype: "mp4" });
+      return true;
+    } finally {
+      updateLoadingBar(false);
     }
   }
 
-  // Master dispatcher for one normalized media item
-  async function downloadResource(item, meta, opts) {
-    opts = opts || {};
-    var dashCandidate = item.dash || state.GL_mediaDataCache[item.id] || null;
-    if (dashCandidate && (!opts.preview || USER_SETTING.NEW_TAB_HIGHEST_VIDEO)) {
-      var okDash = await tryDashDownload(dashCandidate, meta, !!opts.preview);
-      if (okDash) return true;
-    }
-    if (!opts.preview && !item.isVideo && item.id && USER_SETTING.CAPTURE_IMAGE_VIA_MEDIA_CACHE) {
-      var cached = getImageFromCache(item.id);
-      if (cached) {
-        var okCache = await saveFiles(
-          cached,
-          Object.assign({}, meta, {
-            caption: item.caption || meta.caption,
-            index: meta.index != null ? meta.index : 0,
-            filetype: "jpg",
-          })
-        );
-        if (okCache) return true;
+  async function downloadResource(item, meta, opts = {}) {
+    if (!item) return false;
+    meta = {
+      ...meta,
+      sourceType:
+        !meta.sourceType || meta.sourceType === "post" ? (item.isVideo ? "video" : "photo") : meta.sourceType,
+      caption: item.caption || meta.caption,
+      timestamp: item.takenAt || meta.timestamp,
+      thumbnailURL: item.thumb || meta.thumbnailURL,
+      index: item._igSourceIndex || meta.index || 1
+    };
+    if (item.dash) {
+      try {
+        if (await tryDashDownload(item.dash, meta, !!opts.preview)) return true;
+      } catch (e) {
+        Toasts.error("Download failed: " + e.message);
+        return false;
       }
     }
     if (opts.preview) {
@@ -677,8 +713,7 @@
         Toasts.error("Cannot find download URL.");
         return false;
       }
-      openNewTab(replaceSameOriginHost(item.url));
-      return true;
+      return openNewTab(item.url);
     }
     if (!item.url) {
       Toasts.error("Cannot find download URL.");
@@ -688,36 +723,50 @@
       caption: item.caption || meta.caption,
       index: meta.index != null ? meta.index : 0,
       filetype: item.ext || meta.filetype || (item.isVideo ? "mp4" : "jpg"),
-      thumbnailURL: item.thumb || meta.thumbnailURL,
+      thumbnailURL: item.thumb || meta.thumbnailURL
     });
-    return await saveFiles(item.url, finalMeta);
+    const alternate =
+      !item.isVideo && item.id && USER_SETTING.CAPTURE_IMAGE_VIA_MEDIA_CACHE ? getImageFromCache(item.id) : null;
+    return saveFiles(item.url, finalMeta, alternate);
   }
 
   async function batchDownload(items, meta) {
-    var total = items.length;
-    if (!total) return;
-    var done = 0;
-    Progress.set(0, total);
-    for (var i = 0; i < total; i++) {
-      try {
-        var itemMeta = Object.assign({}, meta, { index: items[i]._igSourceIndex || i + 1 });
-        if (items[i].takenAt && USER_SETTING.RENAME_PUBLISH_DATE) {
-          itemMeta.timestamp = items[i].takenAt;
-        }
-        if ((meta.sourceType === "stories" || meta.sourceType === "highlights") && items[i].id) {
-          itemMeta.shortcode = items[i].id;
-        }
-        await downloadResource(items[i], itemMeta, {});
-      } catch (e) {
-        logger("batch item failed:", e && e.message ? e.message : e);
-      }
-      done++;
-      Progress.set(done, total);
-      if (done < total) {
-        await new Promise(function (r) {
-          setTimeout(r, 350);
-        });
-      }
+    if (!items.length) return { saved: 0, failed: 0, skipped: 0 };
+    if (state.batchActive) {
+      Toasts.info("A batch is already running.");
+      return null;
     }
-    notify(NAME, "Downloaded " + done + " of " + total + " items.");
+    state.batchActive = true;
+    const route = location.href;
+    let saved = 0,
+      failed = 0;
+    try {
+      Progress.set(0, items.length);
+      for (const [i, item] of items.entries()) {
+        if (location.href !== route) break;
+        const details = { ...meta, index: item._igSourceIndex || i + 1 };
+        if ((meta.sourceType === "stories" || meta.sourceType === "highlights") && item.id)
+          details.shortcode = item.id;
+        try {
+          if (await downloadResource(item, details)) saved++;
+          else failed++;
+        } catch (_) {
+          failed++;
+        }
+        Progress.set(i + 1, items.length);
+        if (i + 1 < items.length) await new Promise((r) => setTimeout(r, 350));
+      }
+      const skipped = items.length - saved - failed;
+      notify(
+        NAME,
+        `Saved ${saved} of ${items.length} items` +
+          (failed ? ` · ${failed} failed` : "") +
+          (skipped ? ` · ${skipped} skipped` : "") +
+          "."
+      );
+      return { saved, failed, skipped };
+    } finally {
+      state.batchActive = false;
+      if (!state.busy) Progress.hide();
+    }
   }

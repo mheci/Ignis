@@ -3,152 +3,54 @@
      ============================================================ */
 
   // ─── Carousel visible-index detection ──────────────────────────────────
-  function tagCarouselSlides($ul) {
-    if (!$ul || !$ul.length) return;
-    var $slides = $ul.children("li").filter(function () {
-      var w = this.getBoundingClientRect().width;
-      return w > 64 && ($(this).find("img, video").length > 0 || $(this).attr("class"));
-    });
-    if (!$slides.length) return;
-
-    var slideWidth = 0;
-    $slides.each(function () {
-      var w = this.getBoundingClientRect().width;
-      if (w > 64 && !slideWidth) slideWidth = w;
-    });
-    if (!slideWidth) {
-      $slides.each(function () {
-        var m = ($(this).children("div").first().attr("style") || "").match(/width:\s*(\d+(?:\.\d+)?)px/);
-        if (m && !slideWidth) slideWidth = parseFloat(m[1]);
-      });
-    }
-    if (!slideWidth) {
-      var viewport = $ul.parent()[0];
-      slideWidth = viewport ? viewport.getBoundingClientRect().width : 0;
-    }
-
-    $slides.each(function () {
-      var li = this;
-      var style = li.getAttribute("style") || "";
-      if (style.indexOf("translateX") > -1 && slideWidth > 0) {
-        var m = style.match(/translateX\(([^p]+)px\)/);
-        if (m && m[1]) {
-          var pos = Math.round(parseFloat(m[1]) / slideWidth) + 1;
-          if (pos > 0) {
-            li.setAttribute("igh-res-index", String(pos));
-            return;
-          }
-        }
-      }
-      if (!li.hasAttribute("igh-res-index")) {
-        var prev = li.previousElementSibling;
-        var next = li.nextElementSibling;
-        if (prev && prev.hasAttribute("igh-res-index")) {
-          var prevPos = parseInt(prev.getAttribute("igh-res-index"), 10);
-          if (!isNaN(prevPos) && prevPos > 0) li.setAttribute("igh-res-index", String(prevPos + 1));
-        } else if (next && next.hasAttribute("igh-res-index")) {
-          var nextPos = parseInt(next.getAttribute("igh-res-index"), 10);
-          if (!isNaN(nextPos) && nextPos > 1) li.setAttribute("igh-res-index", String(nextPos - 1));
-        }
-      }
-    });
+  function slideOrdinal(li) {
+    if (!li) return null;
+    const explicit = Number(li.getAttribute("aria-posinset"));
+    if (Number.isSafeInteger(explicit) && explicit > 0) return explicit;
+    const translate = li.style.transform.match(/translate(?:X|3d)?\(\s*(-?\d+(?:\.\d+)?)px/i);
+    const width = li.getBoundingClientRect().width;
+    if (translate && width > 0 && Number(translate[1]) >= 0) return Math.round(Number(translate[1]) / width) + 1;
+    return Array.from(li.parentElement.children).indexOf(li) + 1;
   }
-
-  function isActivePostRoute() {
-    return /^\/(?:[^/]+\/)?(?:p|reel)\//.test(location.pathname);
-  }
-
   function getVisibleNodeIndex($main) {
-    if (!$main || !$main.length) return 0;
-
-    if (isActivePostRoute()) {
-      try {
-        var imgIndex = new URLSearchParams(window.location.search).get("img_index");
-        if (imgIndex) {
-          var parsedUrlIndex = parseInt(imgIndex, 10);
-          if (!isNaN(parsedUrlIndex) && parsedUrlIndex >= 1) return parsedUrlIndex - 1;
-        }
-      } catch (e) {
-        /* ignore */
+    const post = $main?.[0];
+    if (!post) return 0;
+    if (postCode(location.href) && getPostContextFromButton(post).postPath === postCode(location.href)) {
+      const index = Number(new URL(location.href).searchParams.get("img_index"));
+      if (Number.isSafeInteger(index) && index >= 1) return index - 1;
+    }
+    const list = Array.from(post.querySelectorAll("ul,ol")).find((el) =>
+      el.querySelector(":scope > li img,:scope > li video")
+    );
+    if (!list) return 0;
+    const viewport = list.parentElement.getBoundingClientRect(),
+      mid = (Math.max(0, viewport.left) + Math.min(innerWidth, viewport.right)) / 2;
+    let nearest = null,
+      best = Infinity;
+    for (const slide of list.children) {
+      if (!slide.matches("li") || !slide.querySelector("img,video")) continue;
+      const r = slide.getBoundingClientRect();
+      if (!r.width || r.right <= Math.max(0, viewport.left) || r.left >= Math.min(innerWidth, viewport.right))
+        continue;
+      const distance = Math.abs((r.left + r.right) / 2 - mid);
+      if (distance < best) {
+        nearest = slide;
+        best = distance;
       }
     }
-
-    var $ul = $main.find("ul[class]").filter(function () {
-      return $(this).children("li").length > 0;
-    }).first();
-    if (!$ul.length) return 0;
-
-    tagCarouselSlides($ul);
-
-    var $slides = $ul.children("li").filter(function () {
-      var w = this.getBoundingClientRect().width;
-      return w > 64 && ($(this).find("img, video").length > 0 || $(this).attr("class"));
-    });
-    if ($slides.length <= 1) {
-      if ($slides.length === 1) {
-        var onlyPos = $slides.get(0).getAttribute("igh-res-index");
-        var onlyParsed = onlyPos ? parseInt(onlyPos, 10) : NaN;
-        if (!isNaN(onlyParsed) && onlyParsed >= 1) return onlyParsed - 1;
-      }
-      return 0;
-    }
-
-    var $viewport = $main.find(".button_wrapper").parent();
-    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) {
-      $viewport = $main
-        .find('*:not([data-pagelet])>*:not([role]):not([data-pagelet])>*:not([style])>*>*[role="presentation"]>*>ul[class]')
-        .parent()
-        .parent("[role]");
-    }
-    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) $viewport = $ul.parent().parent();
-    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) $viewport = $ul.parent();
-
-    if ($viewport.length) {
-      var viewportRect = $viewport.get(0).getBoundingClientRect();
-      var fallbackWidth = viewportRect.width;
-      if (fallbackWidth > 0) {
-        var viewportCenter = (viewportRect.left + viewportRect.right) / 2;
-        var closestSlide = null;
-        var minDistance = Infinity;
-        $slides.each(function () {
-          if (this.getBoundingClientRect().width === 0) return;
-          var rect = this.getBoundingClientRect();
-          var distance = Math.abs((rect.left + rect.right) / 2 - viewportCenter);
-          if (distance < minDistance) {
-            minDistance = distance;
-            closestSlide = this;
-          }
-        });
-        if (closestSlide) {
-          var ighPos = closestSlide.getAttribute("igh-res-index");
-          var parsedPos = ighPos ? parseInt(ighPos, 10) : NaN;
-          if (!isNaN(parsedPos) && parsedPos >= 1) return parsedPos - 1;
-          var style = closestSlide.getAttribute("style") || "";
-          var offsetMatch = style.match(/translateX\(([^p]+)px\)/);
-          if (offsetMatch && offsetMatch[1]) {
-            var offset = parseFloat(offsetMatch[1]);
-            var width = closestSlide.getBoundingClientRect().width || fallbackWidth;
-            if (width > 0) {
-              var offsetIndex = Math.round(offset / width);
-              if (offsetIndex >= 0) return offsetIndex;
-            }
-          }
-          return Math.max(0, $slides.index(closestSlide));
-        }
-      }
-    }
-    return 0;
+    return nearest ? slideOrdinal(nearest) - 1 : -1;
   }
 
   // ─── Shared IntersectionObserver ───────────────────────────────────────
   let sharedIO = null;
-  const ioCallbacks = new WeakMap();
+  let ioCallbacks = new WeakMap();
   function getIO() {
     if (!sharedIO && typeof IntersectionObserver !== "undefined") {
       sharedIO = new IntersectionObserver(
         function (entries) {
           entries.forEach(function (en) {
             if (en.isIntersecting) {
+              sharedIO?.unobserve(en.target);
               var cb = ioCallbacks.get(en.target);
               if (cb) {
                 ioCallbacks.delete(en.target);
@@ -179,20 +81,15 @@
     if (el.closest(".ignis-bar, .ignis-sb, .ignis-rd, .ignis-modal, .ignis-gd")) return false;
     var isDiv = el.tagName === "DIV";
     var hasHeader = el.querySelector(":scope > header, :scope > div > header") != null;
-    var hasLink = el.querySelector('a[href^="/p/"], a[href^="/reel/"]') != null;
-    var hasMedia =
-      el.querySelector("video, img[src*='cdninstagram'], img[src*='fbcdn.net']") != null;
+    var hasLink = Array.from(el.querySelectorAll("a[href]")).some((a) => postCode(a.href));
+    var hasMedia = el.querySelector("video, img[src*='cdninstagram'], img[src*='fbcdn.net']") != null;
     if (!hasLink && !hasHeader) return false;
     if (!hasMedia) return false;
     if (isDiv && el.closest("article")) return false;
     if (isDiv && !hasLink) return false;
     if (isDiv) {
       var r = el.getBoundingClientRect();
-      if (
-        r.width > 0 &&
-        r.height > 0 &&
-        r.width * r.height > window.innerWidth * window.innerHeight * 0.75
-      ) {
+      if (r.width > 0 && r.height > 0 && r.width * r.height > window.innerWidth * window.innerHeight * 0.75) {
         return false;
       }
     }
@@ -306,20 +203,22 @@
 
   function injectPostBar($post) {
     if (!$post || !$post.length) return;
-    if ($post.attr("data-snig") || $post.hasClass("x1iyjqo2")) return;
+    if ($post.attr("data-snig")) return;
     if ($post.parents("div#scrollview").length) return;
     if ($post.find(".ignis-bar, .ignis-rd").length) return;
     var $target = findMediaHost($post);
     if (!$target.length || $target.width() === 0) return;
-    var username = getPostUsername($post) || "";
-    $post.attr("data-snig", "canDownload").attr("data-username", username);
-    $target.css("position", "relative");
+    $post.attr("data-snig", "canDownload");
+    positionHost($target[0]);
     var bar = $('<div class="ignis-bar">');
     bar.append(
       makeButton(SVG.DOWNLOAD, "Download", "ignis-dl"),
       makeButton(SVG.NEW_TAB, "Open in new tab", "ignis-nt")
     );
-    if ($post.find(resourceCountSelector).length > 1) {
+    if (
+      $post.find("ul li").filter((_, n) => n.querySelector("img,video")).length > 1 ||
+      $post.find(resourceCountSelector).length > 1
+    ) {
       bar.append(makeButton(SVG.DOWNLOAD_ALL, "Download all", "ignis-da"));
     }
     $target.append(bar);
@@ -345,23 +244,20 @@
 
   // Grid thumbnails: explore / profile / saved / tagged / related / DM embeds
   function scanGrids() {
-    document
-      .querySelectorAll('a[href^="/p/"], a[href^="/reel/"], a[href*="/p/"], a[href*="/reel/"]')
-      .forEach(function (a) {
+    document.querySelectorAll("a > .ignis-gd").forEach((btn) => {
+      if (!postCode(btn.parentElement.href)) btn.remove();
+    });
+    document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"],a[href*="/reels/"]').forEach(function (a) {
       try {
-        if (a.dataset.igGrid) return;
+        if (a.querySelector(":scope > .ignis-gd")) return;
         if (a.closest("article, header, nav, .ignis-bar, .ignis-modal, div[aria-busy][tabindex]")) return;
         var media = a.querySelector("img, video");
         if (!media) return;
         var r = media.getBoundingClientRect();
         if (r.width < 200 || r.height < 150) return;
-        var href = a.getAttribute("href") || "";
-        var hrefParts = href.split("/").filter(Boolean);
-        var scIdx = hrefParts.indexOf("p");
-        if (scIdx === -1) scIdx = hrefParts.indexOf("reel");
-        if (scIdx === -1 || !hrefParts[scIdx + 1]) return;
-        a.dataset.igGrid = "1";
+        if (!postCode(a.href)) return;
         var btn = document.createElement("button");
+        btn.type = "button";
         btn.className = "ignis-gd";
         btn.title = "Download this post";
         btn.setAttribute("aria-label", "Download this post");
@@ -369,13 +265,10 @@
         btn.addEventListener("click", function (e) {
           e.preventDefault();
           e.stopPropagation();
-          var parts = href.split("/").filter(Boolean);
-          var idx = parts.indexOf("p");
-          if (idx === -1) idx = parts.indexOf("reel");
-          var sc = idx > -1 ? parts[idx + 1] : null;
+          var sc = postCode(a.href);
           if (sc) openPostDialog(sc, { anchor: a });
         });
-        if (getComputedStyle(a).position === "static") a.style.position = "relative";
+        positionHost(a);
         a.appendChild(btn);
       } catch (e) {
         /* never let one anchor break the scan */
@@ -386,36 +279,25 @@
   function getPostContextFromButton(target) {
     var $article = $(target).closest('[data-snig="canDownload"], article, div[data-snig]');
     if (!$article.length) return { $article: $(), postPath: null };
-    var candidates = [];
-    function pushHref(h) {
-      if (h && h.trim()) candidates.push(h.trim());
-    }
-    pushHref($article.find('a[href^="/p/"]').first().attr("href"));
-    pushHref($article.find('a[href^="/reel/"]').first().attr("href"));
-    $article.find('a[role="link"][href], a[href]').each(function () {
-      var h = $(this).attr("href") || "";
-      if (h.indexOf("/p/") > -1 || h.indexOf("/reel/") > -1 || /^\/[^/]+\/(p|reel)\//i.test(h)) {
-        pushHref(h);
-        return false;
-      }
-    });
-    var postPath = null;
-    for (var i = 0; i < candidates.length && !postPath; i++) {
-      var parts = candidates[i].split("/").filter(Boolean);
-      var idx = parts.indexOf("p");
-      if (idx === -1) idx = parts.indexOf("reel");
-      if (idx > -1 && parts[idx + 1]) postPath = parts[idx + 1];
-    }
-    if (!postPath) {
-      var pp = location.pathname.split("/").filter(Boolean);
-      if (pp[0] === "p" || pp[0] === "reel") postPath = pp[1];
-    }
+    const links = Array.from($article[0].querySelectorAll("a[href]"));
+    const timeLink = $article[0].querySelector("time[datetime]")?.closest("a[href]");
+    const postPath =
+      postCode(timeLink?.href) || links.map((a) => postCode(a.href)).find(Boolean) || postCode(location.href);
     return { $article: $article, postPath: postPath };
   }
 
   async function resolvePostShortcode(shortcode, ctx) {
+    const href = location.href;
     try {
-      return await loadPostItems(shortcode, ctx);
+      const loaded = await loadPostItems(shortcode, ctx);
+      const host = ctx?.post || ctx?.anchor;
+      if (
+        host &&
+        (!host.isConnected ||
+          (host.matches('[data-snig="canDownload"]') && getPostContextFromButton(host).postPath !== shortcode))
+      )
+        return null;
+      return location.href === href ? loaded : null;
     } catch (e) {
       Toasts.error("Could not load post: " + ((e && e.message) || "network error"));
       return null;
@@ -449,7 +331,10 @@
   function setStoryProgressIndexText($element, className, username) {
     var $segs = getStoryProgress(username);
     var total = $segs.length;
-    if (total < 2) return;
+    if (total < 2) {
+      $element.find("." + className).remove();
+      return;
+    }
     var current = 0;
     $segs.each(function (i) {
       if ($(this).children().length > 0) current = i + 1;
@@ -462,48 +347,21 @@
       $counter = $('<div class="' + className + ' ignis-sb-pos">');
       $target.append($counter);
     }
-    $counter.text(current + "/" + total).attr("title", "Item " + current + " of " + total);
-  }
-
-  function resolveStoryMediaIdByTimestamp(payload) {
-    var items = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0] && payload.data.reels_media[0].items;
-    if (!items || !items.length) return null;
-    var $time = $('body > div section:visible time[datetime]')
-      .filter(function () {
-        return (
-          $(this).is(":visible") &&
-          $(this).parents('a[href^="/stories/highlights/"]').length === 0 &&
-          $(this).parents('[role="button"]').length === 0
-        );
-      })
-      .first();
-    if (!$time.length) return null;
-    var visibleTs = Math.floor(new Date($time.attr("datetime")).getTime() / 1000);
-    if (!isFinite(visibleTs) || !visibleTs) return null;
-    var bestId = null;
-    var minDiff = Infinity;
-    items.forEach(function (item) {
-      var d = Math.abs((item.taken_at_timestamp || 0) - visibleTs);
-      if (d < minDiff) {
-        minDiff = d;
-        bestId = item.pk || item.id;
-      }
-    });
-    return bestId;
+    if ($counter.text() !== current + "/" + total)
+      $counter.text(current + "/" + total).attr("title", "Item " + current + " of " + total);
   }
 
   function urlStoryId() {
-    var parts = location.pathname.split("/").filter(Boolean);
-    for (var i = parts.length - 1; i >= 0; i--) {
-      if (/^\d{5,}$/.test(parts[i])) return parts[i];
-    }
-    return null;
+    const [, name, id] = location.pathname.split("/").filter(Boolean);
+    return name && name !== "highlights" && /^\d+$/.test(id || "") ? id : null;
   }
 
   async function loadStoryPayload(username, type) {
     var cacheKey = type === "highlights" ? "highlights" : "stories";
     var cacheId = type === "highlights" ? location.pathname.split("/").filter(Boolean).pop() : username;
-    if (state.GL_dataCache[cacheKey][cacheId]) return state.GL_dataCache[cacheKey][cacheId];
+    const cached = state.GL_dataCache[cacheKey][cacheId];
+    if (cached && Date.now() - cached.ts < POST_CACHE_MAX_AGE) return cached.value;
+    const route = location.href;
     var payload;
     if (type === "highlights") {
       payload = await getHighlightStories(cacheId);
@@ -513,48 +371,22 @@
       if (!uid) throw new Error("Cannot resolve user id");
       payload = await getStories(uid, username);
     }
-    state.GL_dataCache[cacheKey][cacheId] = payload;
+    if (route !== location.href) throw new Error("The active page changed");
+    state.GL_dataCache[cacheKey][cacheId] = { value: payload, ts: Date.now() };
     return payload;
   }
 
-  async function resolveStoryTarget(payload, urlId) {
-    var reel = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0];
-    if (!reel) return null;
-    var items = normalizeReelItems(reel.items);
-    if (!items.length) return null;
-    var target = null;
-    if (urlId) {
-      items.forEach(function (it) {
-        if (it.id === urlId) target = it;
-      });
-    }
-    if (!target) {
-      var byTs = resolveStoryMediaIdByTimestamp(payload);
-      if (byTs) {
-        items.forEach(function (it) {
-          if (it.id === byTs) target = it;
-        });
-      }
-    }
-    if (!target) {
-      var countA = $("body > div section._ac0a header._ac0k > ._ac3r ._ac3n ._ac3p[style]").length;
-      var countB = $("body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
-      var countC = 0;
-      var base = $("body > div div:not([hidden]) section:visible > div div[style]:not([class]) > div")[0];
-      if (base) {
-        countC = $(base).find("div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
-      }
-      var nowIndex = countA || countB || countC;
-      if (nowIndex > 0 && nowIndex <= items.length) {
-        target = items[nowIndex - 1];
-      }
-    }
-    if (!target) target = items[0];
-    return { items: items, target: target };
+  function resolveStoryTarget(payload, urlId) {
+    const raw = resolveRawStoryItem(payload, urlId);
+    const target = raw && normalizeItem(raw, payload.data.reels_media[0].items.indexOf(raw));
+    return target ? { target } : null;
   }
 
   function getStoryScopeUsername(type) {
-    var username = type === "highlights" ? getHighlightsStoryUsername() : getStoryUsername();
+    var username =
+      type === "highlights"
+        ? getHighlightsStoryUsername()
+        : cleanName(location.pathname.split("/")[2]) || getStoryUsername();
     if (!username) {
       var parts = location.pathname.split("/").filter(Boolean);
       if (parts[0] === "stories" && parts[1] && parts[1] !== "highlights") username = parts[1];
@@ -581,25 +413,27 @@
       var d = new Date($time.attr("datetime")).getTime() / 1000;
       if (isFinite(d) && d > 0) ts = Math.floor(d);
     }
-    var hasVideo = $("body > div section:visible video[playsinline]").length > 0;
-    if (!hasVideo && username) {
-      var $img = $(
-        "body > div section:visible img[referrerpolicy][class], body > div section:visible img._aa63"
-      ).first();
-      var srcset = parseSrcset($img.attr("srcset") || "");
-      var url = (srcset.length ? srcset[srcset.length - 1].url : null) || $img.attr("src") || "";
-      if (/^https?:/i.test(url)) {
-        var imgMeta = {
-          username: username,
-          sourceType: type,
-          timestamp: ts,
-          shortcode: urlStoryId() || "",
-          filetype: "jpg",
-        };
-        if (isPreview) openNewTab(replaceSameOriginHost(url));
-        else await saveFiles(url, imgMeta);
-        return;
-      }
+    const route = location.href,
+      activeSection = findStoryContainer();
+    const video = activeSection.find("video").get(0);
+    const img = activeSection
+      .find("img")
+      .toArray()
+      .filter((n) => !n.closest("header,nav,a[href]") && n.getBoundingClientRect().width >= 150)
+      .sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0];
+    const direct = video
+      ? trustedURL(video.currentSrc || video.src || video.querySelector("source[src]")?.src)
+      : domImage(img);
+    if (
+      direct &&
+      (!video || !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA || (isPreview && !USER_SETTING.NEW_TAB_HIGHEST_VIDEO))
+    ) {
+      const meta = { username: username || "NONE", sourceType: type, timestamp: ts, shortcode: urlStoryId() || "" };
+      return downloadResource(
+        { url: direct, isVideo: !!video, ext: mediaExtension(direct, video ? "mp4" : "jpg"), thumb: video?.poster },
+        meta,
+        { preview: isPreview }
+      );
     }
     var payload;
     try {
@@ -615,7 +449,7 @@
     }
     var t = await resolveStoryTarget(payload, urlStoryId());
     if (!t) {
-      Toasts.error("No stories found for this account.");
+      Toasts.error("Cannot identify the active item. Use Browse to choose one.");
       return;
     }
     var item = t.target;
@@ -624,24 +458,30 @@
       sourceType: type,
       timestamp: item.takenAt || ts,
       shortcode: item.id,
-      caption: item.caption || null,
+      caption: item.caption || null
     };
-    if (USER_SETTING.FORCE_RESOURCE_VIA_MEDIA && USER_SETTING.PREFER_DASH_MANIFEST && item.id) {
+    if (
+      item.isVideo &&
+      !item.dash &&
+      USER_SETTING.FORCE_RESOURCE_VIA_MEDIA &&
+      USER_SETTING.PREFER_DASH_MANIFEST &&
+      item.id &&
+      (!isPreview || USER_SETTING.NEW_TAB_HIGHEST_VIDEO)
+    ) {
       try {
-        var mi = await getMediaInfo(item.id);
-        if (mi && mi.status === "ok" && mi.items && mi.items[0]) {
-          var mediaItem = mi.items[0];
-          var dashOk = await tryDashDownload(mediaItem, meta, isPreview);
-          if (dashOk) return;
-        }
+        const mi = await getMediaInfo(item.id);
+        const offered = mi.items?.find((v) =>
+          [v?.id, v?.pk].some((id) => id != null && String(id).split("_")[0] === item.id.split("_")[0])
+        );
+        if (offered?.video_dash_manifest) item.dash = offered;
       } catch (e) {
-        if (!USER_SETTING.FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED) {
-          Toasts.error("Media API failed: " + ((e && e.message) || "network error"));
+        if ((e.stopLookup && e.status !== 429) || !USER_SETTING.FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED) {
+          Toasts.error(e.message);
+          return;
         }
       }
     }
-    if (isPreview) openNewTab(replaceSameOriginHost(item.url));
-    else await saveFiles(item.url, Object.assign({}, meta, { filetype: item.ext || "mp4", thumbnailURL: item.thumb }));
+    if (location.href === route) return downloadResource(item, meta, { preview: isPreview });
   }
 
   async function downloadStoryThumbnail(type) {
@@ -698,9 +538,11 @@
         shortcode: (reel && reel.id) || "",
         sourceType: type,
         timestamp: Math.floor(Date.now() / 1000),
-        caption: null,
+        caption: null
       };
-      await batchDownload(items, meta);
+      const route = location.href,
+        batch = await batchDownload(items, meta);
+      if (!batch || batch.skipped || location.href !== route) return;
       if (type === "stories" && USER_SETTING.DOWNLOAD_STORY_HIGHLIGHTS) {
         try {
           var userInfo = await getUserId(owner);
@@ -708,7 +550,9 @@
           if (uid) {
             var tray = await getUserHighlights(uid);
             for (var i = 0; i < tray.length; i++) {
+              if (route !== location.href) return;
               var hl = await getHighlightStories(tray[i].id);
+              if (route !== location.href) return;
               var hReel = hl.data && hl.data.reels_media && hl.data.reels_media[0];
               var hItems = normalizeReelItems(hReel ? hReel.items : []);
               if (hItems.length) {
@@ -717,13 +561,13 @@
                   shortcode: (hReel && hReel.id) || "",
                   sourceType: "highlights",
                   timestamp: Math.floor(Date.now() / 1000),
-                  caption: null,
+                  caption: null
                 });
               }
             }
           }
         } catch (e) {
-          logger("highlights batch failed:", e && e.message ? e.message : e);
+          Toasts.error("Highlights batch stopped: " + e.message);
         }
       }
     } catch (e) {
@@ -732,22 +576,24 @@
   }
 
   // ─── Story item resolution & tagged profiles ───────────────────────────
-  function resolveRawStoryItem(payload) {
+  function resolveRawStoryItem(payload, urlId = urlStoryId()) {
     var reel = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0];
-    var items = (reel && reel.items) || [];
+    var items = Array.isArray(reel?.items) ? reel.items.filter(Boolean) : [];
     if (!items.length) return null;
 
-    var urlId = urlStoryId();
     if (urlId) {
       for (var i = 0; i < items.length; i++) {
-        var ids = [items[i].id, items[i].pk].filter(function (id) {
-          return id != null;
-        }).map(String);
+        var ids = [items[i].id, items[i].pk]
+          .filter(function (id) {
+            return id != null;
+          })
+          .map(String);
         var baseIds = ids.map(function (id) {
           return id.split("_")[0];
         });
         if (ids.indexOf(String(urlId)) > -1 || baseIds.indexOf(String(urlId)) > -1) return items[i];
       }
+      return null; // An explicit ID must not silently select somebody else’s item.
     }
 
     var $time = $("body > div section:visible time[datetime]")
@@ -776,19 +622,25 @@
     }
 
     var countA = $("body > div section._ac0a header._ac0k > ._ac3r ._ac3n ._ac3p[style]").length;
-    var countB = $("body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
+    var countB = $(
+      "body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6"
+    ).length;
     var nowIndex = countA || countB;
     if (nowIndex > 0 && nowIndex <= items.length) return items[nowIndex - 1];
-    return items[0];
+    return items.length === 1 ? items[0] : null;
   }
 
   function extractTaggedProfiles(item, excludeUsername) {
     var profiles = new Map();
     var stickers = item && Array.isArray(item.story_bloks_stickers) ? item.story_bloks_stickers : [];
     stickers.forEach(function (sticker) {
-      var username = sticker && sticker.bloks_sticker && sticker.bloks_sticker.sticker_data &&
-        sticker.bloks_sticker.sticker_data.ig_mention && sticker.bloks_sticker.sticker_data.ig_mention.username;
-      if (typeof username !== "string" || !username) return;
+      var username =
+        sticker &&
+        sticker.bloks_sticker &&
+        sticker.bloks_sticker.sticker_data &&
+        sticker.bloks_sticker.sticker_data.ig_mention &&
+        sticker.bloks_sticker.sticker_data.ig_mention.username;
+      if (!cleanName(username)) return;
       if (excludeUsername && username.toLowerCase() === excludeUsername.toLowerCase()) return;
       var key = username.toLowerCase();
       if (!profiles.has(key)) profiles.set(key, username);
@@ -865,7 +717,7 @@
     var $button = $(
       'div[id^="mount"] section:last-child > div > div:not([class]) div:last-child > div[role="button"]'
     ).filter(function () {
-      return $(this).children().length === 0 && this.textContent.trim() !== "";
+      return $(this).children().length === 0 && /^view story$/i.test(this.textContent.trim());
     });
     if ($button.length) {
       $button.first().trigger("click");
@@ -891,13 +743,14 @@
       if (!$dialog.is(":visible")) return;
       var $headers = $dialog.find("h2");
       if (!$headers.length) return;
-      var isSharedHeader = $headers.filter(function () {
-        var text = (this.textContent || "").trim().toLowerCase();
-        if (!text) return false;
-        if (text.indexOf("shared this with you") > -1) return true;
-        if (text.indexOf("shared with you") > -1) return true;
-        return !!(profileUsername && text.indexOf(profileUsername) > -1 && text.indexOf("shared") > -1);
-      }).length > 0;
+      var isSharedHeader =
+        $headers.filter(function () {
+          var text = (this.textContent || "").trim().toLowerCase();
+          if (!text) return false;
+          if (text.indexOf("shared this with you") > -1) return true;
+          if (text.indexOf("shared with you") > -1) return true;
+          return !!(profileUsername && text.indexOf(profileUsername) > -1 && text.indexOf("shared") > -1);
+        }).length > 0;
       if (!isSharedHeader) return;
 
       var $buttons = $dialog.find('div[role="button"]');
@@ -909,7 +762,6 @@
           return false;
         }
       });
-      if ((!$notNow || !$notNow.length) && $buttons.length === 2) $notNow = $buttons.last();
       if ($notNow && $notNow.length) $notNow.trigger("click");
     });
   }
@@ -917,18 +769,21 @@
   function maybeSkipSharedDialog() {
     if (!USER_SETTING.SKIP_SHARED_WITH_YOU_DIALOG || !window.location.search.includes("igsh")) return;
     var tries = 0;
-    var timer = setInterval(function () {
+    var timer = (state.sharedDialogTimer = setInterval(function () {
       if (!window.location.search.includes("igsh") || ++tries > 20) {
         clearInterval(timer);
         return;
       }
       skipSharedWithYouDialog();
-    }, 200);
+    }, 200));
   }
 
   // ─── Story controls ────────────────────────────────────────────────────
   function ensureStoryTools($host) {
-    if (getComputedStyle($host[0]).position === "static") $host.css("position", "relative");
+    positionHost($host[0]);
+    $(".ignis-storytools")
+      .filter((_, el) => el.parentElement !== $host[0])
+      .remove();
     var $bar = $host.children(".ignis-storytools").first();
     if (!$bar.length) {
       $bar = $('<div class="ignis-storytools">');
@@ -939,7 +794,7 @@
 
   function attachStoryButtons() {
     var $element = findStoryContainer();
-    if (!$element) return;
+    if (!$element?.length) return;
     var $bar = ensureStoryTools($element);
     var username = getStoryUsername() || "";
     if (!$bar.find(".ignis-sd").length) {
@@ -962,7 +817,7 @@
 
   function attachHighlightButtons() {
     var $element = findStoryContainer();
-    if (!$element) return;
+    if (!$element?.length) return;
     var $bar = ensureStoryTools($element);
     var username = getHighlightsStoryUsername() || "";
     if (!$bar.find(".ignis-hd").length) {
@@ -1010,21 +865,19 @@
   function scanStoryPage() {
     attachStoryButtons();
     skipStoryConfirm();
-    var $host = $(".ignis-sd").first().closest(".ignis-storytools").parent();
-    if ($host.find("video").length) attachStoryThumbnailButton();
+    attachStoryThumbnailButton();
   }
 
   function scanHighlightPage() {
     attachHighlightButtons();
     skipStoryConfirm();
-    var $host = $(".ignis-hd").first().closest(".ignis-storytools").parent();
-    if ($host.find("video").length) attachHighlightThumbnailButton();
+    attachHighlightThumbnailButton();
   }
 
   // ─── Reels ─────────────────────────────────────────────────────────────
   function attachReelBar($main) {
     if (!$main || !$main.length || $main.find(".ignis-rd, .ignis-bar").length) return;
-    $main.css("position", "relative");
+    positionHost($main[0]);
     $main.append(
       makeButton(SVG.DOWNLOAD, "Download reel", "ignis-rd").css({ right: "40px", top: "15px" }),
       makeButton(SVG.NEW_TAB, "Open reel in new tab", "ignis-rn").css({ right: "40px", top: "51px" })
@@ -1032,34 +885,51 @@
   }
 
   function onReelsPage() {
-    $("div[aria-busy][tabindex]").children("div").each(function () {
-      var $c = $(this);
-      if (
-        $c.children().length &&
-        $c.width() > window.innerWidth * 0.8 &&
-        $c.height() > window.innerHeight * 0.8 &&
-        $c.find("video").length
-      ) {
-        attachReelBar($c);
+    for (const video of document.querySelectorAll("main video,div[aria-busy][tabindex] video")) {
+      if (video.closest(".ignis-modal")) continue;
+      const rect = video.getBoundingClientRect();
+      if (rect.width < 140 || rect.height < 120) continue;
+      let host = video.parentElement;
+      for (let el = host; el && !el.matches("main, body"); el = el.parentElement) {
+        if (el.querySelectorAll("video").length !== 1) break;
+        if (Array.from(el.querySelectorAll("a[href]")).some((a) => postCode(a.href))) {
+          host = el;
+          break;
+        }
       }
-    });
+      if (host) attachReelBar($(host));
+    }
   }
 
-  async function downloadCurrentReel(isPreview) {
-    var path = location.pathname.split("/").filter(Boolean);
-    var shortcode = null;
-    if (path[0] === "reels" && path[1]) shortcode = path[1];
-    if (!shortcode) {
-      Toasts.error("Cannot resolve reel id.");
+  async function downloadCurrentReel(isPreview, button) {
+    const host = button.parentElement,
+      route = location.href;
+    const code =
+      Array.from(host.querySelectorAll("a[href]"))
+        .map((a) => postCode(a.href))
+        .find(Boolean) || postCode(route);
+    const video = host.querySelector("video"),
+      direct = trustedURL(video?.currentSrc || video?.src || video?.querySelector("source[src]")?.src);
+    if (
+      direct &&
+      (!code || !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA || (isPreview && !USER_SETTING.NEW_TAB_HIGHEST_VIDEO))
+    )
+      return downloadResource(
+        { isVideo: true, url: direct, thumb: trustedURL(video.poster), ext: mediaExtension(direct, "mp4") },
+        { sourceType: "reels", shortcode: code || "", username: getPostUsername($(host)) || "NONE" },
+        { preview: isPreview }
+      );
+    if (!code) {
+      Toasts.info("No downloadable reel is visible.");
       return;
     }
-    var loaded = await resolvePostShortcode(shortcode);
-    if (!loaded) return;
-    var meta = Object.assign({}, loaded.meta, { sourceType: "reels", caption: null });
-    var item = loaded.items[0];
-    if (!item) return;
-    if (isPreview) openNewTab(replaceSameOriginHost(item.url));
-    else await downloadResource(item, meta, {});
+    const loaded = await resolvePostShortcode(code, { post: host, complete: true });
+    if (loaded && location.href === route && host.isConnected) {
+      const videoItem = loaded.items.find((i) => i.isVideo);
+      if (videoItem)
+        await downloadResource(videoItem, { ...loaded.meta, sourceType: "reels" }, { preview: isPreview });
+      else Toasts.info("No downloadable reel is visible.");
+    }
   }
 
   // ─── Profile avatar ────────────────────────────────────────────────────
@@ -1071,7 +941,7 @@
     var $mount = $img.is("[draggable]") ? $img.parent().parent() : $img.parent().parent().parent();
     if (!$mount.length) $mount = $img.parent().parent();
     if (!$mount.length) return;
-    $mount.css("position", "relative");
+    positionHost($mount[0]);
     if ($mount.find(".ignis-pd").length) return;
     $mount.append(makeButton(SVG.DOWNLOAD, "Download profile picture", "ignis-pd"));
   }
@@ -1087,8 +957,14 @@
       return;
     }
     try {
-      var userInfo = await getUserId(username);
-      var uid = (userInfo.user && (userInfo.user.pk || userInfo.user.id)) || null;
+      const route = location.href;
+      let userInfo = null;
+      if (USER_SETTING.DOWNLOAD_PROFILE_PIC_HD) {
+        try {
+          userInfo = await getUserId(username);
+        } catch (_) {}
+      }
+      var uid = userInfo?.user?.pk || userInfo?.user?.id || null;
       var url = null;
       if (USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && uid) {
         try {
@@ -1125,20 +1001,22 @@
         url = userInfo.user._hdUrl;
       }
       if (!url) {
-        url = (userInfo && userInfo.user && (userInfo.user.profile_pic_url || userInfo.user.profile_pic_url_hd)) ||
+        url =
+          (userInfo && userInfo.user && (userInfo.user.profile_pic_url || userInfo.user.profile_pic_url_hd)) ||
           $("header img[alt]").first().attr("src");
       }
       if (!url) {
         Toasts.error("Cannot find profile picture URL.");
         return;
       }
+      if (location.href !== route) return;
       await saveFiles(url, {
         username: username,
         sourceType: "avatar",
         timestamp: Math.floor(Date.now() / 1000),
         shortcode: username,
         filetype: "jpg",
-        uid: uid,
+        uid: uid
       });
     } catch (e) {
       Toasts.error("Could not download profile picture: " + ((e && e.message) || "network error"));
@@ -1205,7 +1083,7 @@
       // The observer doubles as the navigation safety net: any DOM churn on
       // an unclassified/blacklisted page re-runs the router, so no periodic
       // watchdog is needed.
-      if (state.firstStarted && (!state.pageLoaded || location.href !== state.currentURL)) {
+      if (state.firstStarted && ((!state.pageLoaded && !state.blocked) || location.href !== state.currentURL)) {
         Router.enter();
         return;
       }
@@ -1217,27 +1095,57 @@
   let domObserverRoot = null;
   function installDomObserver() {
     if (domObserver) domObserver.disconnect();
-    var mount = document.querySelector('div[id^="mount"]') || document.body;
+    var mount = document.documentElement;
     domObserverRoot = mount;
     domObserver = new MutationObserver(function (muts) {
-      // Only structural additions need a rescan; removal-only batches
-      // (React teardowns) would otherwise wake the scanner for nothing.
-      for (var i = 0; i < muts.length; i++) {
-        if (muts[i].addedNodes && muts[i].addedNodes.length) {
-          scheduleScan();
-          return;
-        }
-      }
+      if ($body[0] !== document.body && document.body) $body = $(document.body);
+      const own =
+        ".ignis-modal,.ignis-bar,.ignis-storytools,.ignis-progress,.ignis-toasts,.ignis-palette,.ignis-ksh,.ignis-rd,.ignis-rn,.ignis-pd,.ignis-gd";
+      if (
+        location.href !== state.currentURL ||
+        muts.some(
+          (m) =>
+            !m.target.closest?.(own) &&
+            ((m.type === "attributes" && m.target.matches("a[href],#splash-screen")) ||
+              Array.from(m.addedNodes).some((n) => n.nodeType === 1 && !n.matches(own)) ||
+              Array.from(m.removedNodes).some(
+                (n) => n.nodeType === 1 && (n.id === "splash-screen" || n.matches(".ignis-bar,.ignis-gd"))
+              ) ||
+              (!state.pageLoaded && !state.blocked && m.target.id === "splash-screen"))
+        )
+      )
+        scheduleScan();
     });
-    domObserver.observe(mount, { childList: true, subtree: true });
+    domObserver.observe(mount, { childList: true, subtree: true, attributes: true, attributeFilter: ["href"] });
+    const splash = document.getElementById("splash-screen");
+    if (splash)
+      domObserver.observe(splash, {
+        attributes: true,
+        attributeFilter: ["style", "class", "hidden"],
+        childList: true,
+        subtree: true
+      });
   }
 
   // ─── Delegated click handlers ──────────────────────────────────────────
+  function selectedPostItem(loaded, index) {
+    const item = loaded.items.find((it) => it._igSourceIndex === index + 1);
+    if (!item) Toasts.info("Could not identify this slide. Open the post dialog to choose an item.");
+    return item;
+  }
+  async function downloadPostBatch(ctx) {
+    const post = ctx.$article[0],
+      loaded = await resolvePostShortcode(ctx.postPath, { post, complete: true });
+    if (!loaded) return;
+    if (loaded.fromDom) return openPostDialog(ctx.postPath, { post, initial: loaded });
+    return batchDownload(loaded.items, loaded.meta);
+  }
+
   function registerBodyHandlers() {
     if (state.bodyEventsRegistered) return;
     state.bodyEventsRegistered = true;
 
-    $body.on("click.ignisEvents", ".ignis-dl", function () {
+    $(document).on("click.ignisEvents", ".ignis-dl", function () {
       var ctx = getPostContextFromButton(this);
       if (!ctx.postPath) {
         Toasts.error("Cannot find the post link.");
@@ -1245,16 +1153,14 @@
       }
       var postEl = ctx.$article[0] || null;
       if (USER_SETTING.DIRECT_DOWNLOAD_ALL) {
-        resolvePostShortcode(ctx.postPath, { post: postEl }).then(function (loaded) {
-          if (loaded) batchDownload(loaded.items, loaded.meta);
-        });
+        downloadPostBatch(ctx);
         return;
       }
       if (USER_SETTING.DIRECT_DOWNLOAD_VISIBLE_RESOURCE) {
         var index = getVisibleNodeIndex(ctx.$article);
-        resolvePostShortcode(ctx.postPath, { post: postEl }).then(function (loaded) {
+        resolvePostShortcode(ctx.postPath, { post: postEl, complete: true }).then(function (loaded) {
           if (!loaded) return;
-          var item = loaded.items[index] || loaded.items[0];
+          var item = selectedPostItem(loaded, index);
           if (item) downloadResource(item, loaded.meta, {});
         });
         return;
@@ -1262,95 +1168,101 @@
       openPostDialog(ctx.postPath, { post: postEl });
     });
 
-    $body.on("click.ignisEvents", ".ignis-da", function () {
+    $(document).on("click.ignisEvents", ".ignis-da", function () {
       var ctx = getPostContextFromButton(this);
       if (!ctx.postPath) {
         Toasts.error("Cannot find the post link.");
         return;
       }
-      resolvePostShortcode(ctx.postPath, { post: ctx.$article[0] || null }).then(function (loaded) {
-        if (loaded) batchDownload(loaded.items, loaded.meta);
-      });
+      downloadPostBatch(ctx);
     });
 
-    $body.on("click.ignisEvents", ".ignis-nt", function () {
+    $(document).on("click.ignisEvents", ".ignis-nt", function () {
       var ctx = getPostContextFromButton(this);
       if (!ctx.postPath) {
         Toasts.error("Cannot find the post link.");
         return;
       }
       var index = getVisibleNodeIndex(ctx.$article);
-      resolvePostShortcode(ctx.postPath, { post: ctx.$article[0] || null }).then(function (loaded) {
+      resolvePostShortcode(ctx.postPath, { post: ctx.$article[0] || null, complete: true }).then(function (loaded) {
         if (!loaded) return;
-        var item = loaded.items[index] || loaded.items[0];
+        var item = selectedPostItem(loaded, index);
         if (item) downloadResource(item, loaded.meta, { preview: true });
       });
     });
 
-    $body.on("click.ignisEvents", ".ignis-th", function () {
+    $(document).on("click.ignisEvents", ".ignis-th", function () {
       var ctx = getPostContextFromButton(this);
       if (!ctx.postPath) {
         Toasts.error("Cannot find the post link.");
         return;
       }
       var index = getVisibleNodeIndex(ctx.$article);
-      resolvePostShortcode(ctx.postPath, { post: ctx.$article[0] || null }).then(function (loaded) {
+      resolvePostShortcode(ctx.postPath, { post: ctx.$article[0] || null, complete: true }).then(function (loaded) {
         if (!loaded) return;
-        var item = loaded.items[index] || loaded.items[0];
+        var item = selectedPostItem(loaded, index);
         if (item && item.thumb) {
-          saveFiles(item.thumb, Object.assign({}, loaded.meta, { sourceType: "thumbnail", filetype: "jpg" }));
+          saveFiles(
+            item.thumb,
+            Object.assign({}, loaded.meta, {
+              index: item._igSourceIndex,
+              timestamp: item.takenAt || loaded.meta.timestamp,
+              sourceType: "thumbnail",
+              filetype: "jpg"
+            })
+          );
         }
       });
     });
 
-    $body.on("click.ignisEvents", ".ignis-sd", function () {
+    $(document).on("click.ignisEvents", ".ignis-sd", function () {
       if (USER_SETTING.DIRECT_DOWNLOAD_STORY) downloadStoriesAll("stories");
       else downloadStoryCurrent("stories", false);
     });
-    $body.on("click.ignisEvents", ".ignis-sn", function () {
+    $(document).on("click.ignisEvents", ".ignis-sn", function () {
       downloadStoryCurrent("stories", true);
     });
-    $body.on("click.ignisEvents", ".ignis-sa", function () {
+    $(document).on("click.ignisEvents", ".ignis-sa", function () {
       downloadStoriesAll("stories");
     });
-    $body.on("click.ignisEvents", ".ignis-st", function () {
+    $(document).on("click.ignisEvents", ".ignis-st", function () {
       downloadStoryThumbnail("stories");
     });
 
-    $body.on("click.ignisEvents", ".ignis-hd", function () {
+    $(document).on("click.ignisEvents", ".ignis-hd", function () {
       if (USER_SETTING.DIRECT_DOWNLOAD_STORY) downloadStoriesAll("highlights");
       else downloadStoryCurrent("highlights", false);
     });
-    $body.on("click.ignisEvents", ".ignis-hn", function () {
+    $(document).on("click.ignisEvents", ".ignis-hn", function () {
       downloadStoryCurrent("highlights", true);
     });
-    $body.on("click.ignisEvents", ".ignis-ha", function () {
+    $(document).on("click.ignisEvents", ".ignis-ha", function () {
       downloadStoriesAll("highlights");
     });
-    $body.on("click.ignisEvents", ".ignis-ht", function () {
+    $(document).on("click.ignisEvents", ".ignis-ht", function () {
       downloadStoryThumbnail("highlights");
     });
-    $body.on("click.ignisEvents", ".ignis-tp", function () {
+    $(document).on("click.ignisEvents", ".ignis-tp", function () {
       showTaggedProfiles("stories");
     });
-    $body.on("click.ignisEvents", ".ignis-htp", function () {
+    $(document).on("click.ignisEvents", ".ignis-htp", function () {
       showTaggedProfiles("highlights");
     });
-    $body.on("click.ignisEvents", ".ignis-sl", function () {
+    $(document).on("click.ignisEvents", ".ignis-sl", function () {
       openStoryBrowser("stories");
     });
-    $body.on("click.ignisEvents", ".ignis-hl", function () {
+    $(document).on("click.ignisEvents", ".ignis-hl", function () {
       openStoryBrowser("highlights");
     });
 
-    $body.on("click.ignisEvents", ".ignis-rd", function () {
-      downloadCurrentReel(false);
+    $(document).on("click.ignisEvents", ".ignis-rd", function () {
+      downloadCurrentReel(false, this);
     });
-    $body.on("click.ignisEvents", ".ignis-rn", function () {
-      downloadCurrentReel(true);
+    $(document).on("click.ignisEvents", ".ignis-rn", function () {
+      downloadCurrentReel(true, this);
     });
 
-    $body.on("click.ignisEvents", ".ignis-pd", function () {
+    $(document).on("click.ignisEvents", ".ignis-pd", function () {
       downloadAvatar();
     });
   }
@@ -1358,6 +1270,7 @@
   // ─── Router ────────────────────────────────────────────────────────────
   const Router = {
     enter: function () {
+      this.cleanup();
       state.firstStarted = true;
       state.currentURL = location.href;
       state.route = null;
@@ -1365,18 +1278,17 @@
       var path = location.pathname;
       var blacklist =
         /^\/(challenge\/?.*|qr\/?|accounts\/.*|emails\/.*|language\/?.*?|your_activity\/?.*|settings\/help(\/.*)?|auth_platform\/codeentry\/?.*|consent\/?.*)$/i;
-      if (
-        blacklist.test(path) ||
-        ($("div#splash-screen").length > 0 && !$("div#splash-screen").is(":hidden"))
-      ) {
+      state.blocked = blacklist.test(path);
+      if (state.blocked || ($("div#splash-screen").length > 0 && !$("div#splash-screen").is(":hidden"))) {
         state.pageLoaded = false;
+        if (!state.blocked) installDomObserver();
         return;
       }
-      if (path === "/" || path.startsWith("/explore")) {
-        state.route = "explore";
+      if (path === "/" || /^\/explore(?:\/|$)/.test(path)) {
+        state.route = path === "/" ? "home" : "explore";
       } else if (path.startsWith("/p/") || path.startsWith("/reel/") || /^\/([^/]+)\/(p|reel)\//.test(path)) {
         state.route = "post";
-      } else if (path.startsWith("/reels/")) {
+      } else if (/^\/reels(?:\/|$)/.test(path)) {
         state.route = "reels";
       } else if (path.startsWith("/stories/highlights/")) {
         state.route = "highlights";
@@ -1393,7 +1305,6 @@
         state.route = null;
       }
       state.pageLoaded = true;
-      this.cleanup();
       maybeSkipSharedDialog();
       // Self-heal: Instagram occasionally swaps the mount node, which would
       // silently orphan the observer. Re-arm it whenever the root died.
@@ -1441,6 +1352,15 @@
       clearTimeout(state.postPoll);
       state.postPoll = null;
       clearTimeout(state.homepageObserverDebounce);
+      clearInterval(state.sharedDialogTimer);
+      sharedIO?.disconnect();
+      sharedIO = null;
+      ioCallbacks = new WeakMap();
+      while (ModalStack.modals.length) ModalStack.pop();
+      $(document).off("keydown.igpal");
+      $(".ignis-bar,.ignis-storytools,.ignis-rd,.ignis-rn,.ignis-gd,.ignis-pd,.ignis-palette,.ignis-ksh").remove();
+      $("[data-snig=canDownload]").removeAttr("data-snig");
+      $(".ignis-position-host").removeClass("ignis-position-host");
       var now = Date.now();
       Object.keys(state.GL_payloadCache).forEach(function (k) {
         var c = state.GL_payloadCache[k];
@@ -1449,19 +1369,14 @@
       // Story/highlight payloads are re-fetchable; keep them for the session
       // (per-item swipes reuse them) but bound total retention.
       var dcCount =
-        Object.keys(state.GL_dataCache.stories).length +
-        Object.keys(state.GL_dataCache.highlights).length;
+        Object.keys(state.GL_dataCache.stories).length + Object.keys(state.GL_dataCache.highlights).length;
       if (dcCount > 30) {
-        state.GL_dataCache.stories = {};
-        state.GL_dataCache.highlights = {};
-      }
-      if (Object.keys(state.GL_mediaDataCache).length > 200) {
-        state.GL_mediaDataCache = {};
+        state.GL_dataCache.stories = Object.create(null);
+        state.GL_dataCache.highlights = Object.create(null);
       }
     },
     start: function () {
-      // Navigation is delivered by the document-start history hooks
-      // (pushState/replaceState wrappers + popstate/hashchange). Coalesce
+      // Navigation events and the DOM observer work across manager sandboxes. Coalesce
       // bursts (IG fires several mutations per route change) into one enter.
       var navTimer = null;
       __ignisOnNavigate = function () {
@@ -1471,5 +1386,5 @@
           if (location.href !== state.currentURL) Router.enter();
         }, 60);
       };
-    },
+    }
   };

@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name               IGNIS — Instagram Enhancement Suite
-// @version            1.0.0
+// @version            1.0.1
 // @description        IGNIS: high-quality downloads (posts, reels, stories, highlights, HD avatars, DASH video+audio MP4 mux, captions, EXIF), tagged-profile lookup, IndexedDB caches, local statistics, and a rebuilt interface.
 // @author             IGNIS
-// @match              https://*.instagram.com/*
+// @match              https://www.instagram.com/*
+// @match              https://instagram.com/*
 // @downloadURL        https://github.com/mheci/Ignis/releases/latest/download/ignis.user.js
 // @updateURL          https://github.com/mheci/Ignis/releases/latest/download/ignis.user.js
-// @require            https://code.jquery.com/jquery-4.0.0.min.js
-// @require            https://cdn.jsdelivr.net/npm/mediabunny@1.34.5/dist/bundles/mediabunny.min.cjs
+// @require            https://code.jquery.com/jquery-4.0.0.min.js#sha256=39a546ea9ad97f8bfaf5d3e0e8f8556adb415e470e59007ada9759dce472adaa
+// @require            https://cdn.jsdelivr.net/npm/mediabunny@1.34.5/dist/bundles/mediabunny.min.cjs#sha256=c14151fb1d9b0efa6a80c0151b2d82bc6bd42f28d31af1b2e145009bcada7b95
 // @grant              GM_addStyle
 // @grant              GM_download
 // @grant              GM_deleteValue
@@ -16,74 +17,55 @@
 // @grant              GM_registerMenuCommand
 // @grant              GM_setValue
 // @grant              GM_unregisterMenuCommand
-// @grant              unsafeWindow
+// @grant              GM_openInTab
 // @grant              GM_xmlhttpRequest
-// @connect            *
-// @icon               https://www.google.com/s2/favicons?domain=www.instagram.com&sz=32
+// @grant              GM.getValue
+// @grant              GM.setValue
+// @grant              GM.deleteValue
+// @grant              GM.download
+// @grant              GM.openInTab
+// @grant              GM.notification
+// @grant              GM.registerMenuCommand
+// @grant              GM.unregisterMenuCommand
+// @grant              GM.xmlHttpRequest
+// @connect            instagram.com
+// @connect            cdninstagram.com
+// @connect            fbcdn.net
+// @noframes
 // @license            GPL-3.0-only
 // @compatible         chrome >= 100
 // @compatible         edge >= 100
 // @compatible         firefox >= 100
-// @run-at             document-start
+// @run-at             document-end
 // ==/UserScript==
-
-(function () {
+// Managers may concatenate @requires without semicolons. Mediabunny ends
+// with a conditional CommonJS export; do not let it capture our IIFE.
+;(function () {
   "use strict";
 
-  const VERSION = "1.0.0";
+  const VERSION = "1.0.1";
   const NAME = "IGNIS";
   const $ = jQuery;
 
-  var __ignisFocusTarget = (typeof unsafeWindow !== "undefined" && unsafeWindow) || window;
-  var __ignisNativeFocus = null;
-  try {
-    __ignisNativeFocus = __ignisFocusTarget.focus.bind(__ignisFocusTarget);
-    var __ignisGuardedFocus = function () {
-      try {
-        if (!document.hasFocus()) return;
-      } catch (e) {}
-      return __ignisNativeFocus.apply(__ignisFocusTarget, arguments);
-    };
-    window.focus = __ignisGuardedFocus;
-    __ignisFocusTarget.focus = __ignisGuardedFocus;
-  } catch (e) {}
-
+  // Navigation events cover history changes in the page's own realm. On older
+  // browsers the DOM observer also compares location.href after site renders.
   var __ignisOnNavigate = null;
   function __ignisHandleNavigate() {
-    if (typeof __ignisOnNavigate !== "function") return;
-    try {
-      __ignisOnNavigate();
-    } catch (e) {
-
-    }
-  }
-  try {
-    var __ignisPushState = history.pushState;
-    var __ignisReplaceState = history.replaceState;
-    history.pushState = function () {
-      var r = __ignisPushState.apply(this, arguments);
-      __ignisHandleNavigate();
-      return r;
-    };
-    history.replaceState = function () {
-      var r = __ignisReplaceState.apply(this, arguments);
-      __ignisHandleNavigate();
-      return r;
-    };
-  } catch (e) {
-
+    __ignisOnNavigate?.();
   }
   window.addEventListener("popstate", __ignisHandleNavigate);
   window.addEventListener("hashchange", __ignisHandleNavigate);
+  window.navigation?.addEventListener("currententrychange", __ignisHandleNavigate);
 
+  // ─── Settings catalog [key, category, label, description, default] ─────
   const SETTINGS = [
-    ["AUTO_RENAME", "download", "Auto Rename Files", "Auto-renames downloaded files. Right-click the row to edit the template.", true],
+    ["AUTO_RENAME", "download", "Auto Rename Files", "Auto-renames downloaded files. Click the label to edit the template.", true],
     ["RENAME_PUBLISH_DATE", "download", "Use Publish Date in Filename", "Uses the post publish date instead of the download time.", true],
-    ["CAPTURE_IMAGE_VIA_MEDIA_CACHE", "download", "Capture Images via Cache", "Captures high-quality image URLs from the page's resource cache.", true],
-    ["DOWNLOAD_ORIGINAL_QUALITY", "download", "Download Original Quality", "Strips size constraints from CDN URLs to get the original file.", true],
-    ["FORCE_RESOURCE_VIA_MEDIA", "download", "Fetch via Media API", "Fetches resources via the Media API for the highest quality.", true],
-    ["PREFER_DASH_MANIFEST", "download", "Prefer DASH Manifest", "Downloads separate highest-quality video + audio DASH streams and merges them.", true],
-    ["FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED", "download", "Fallback if API Throttled", "Falls back to direct links when the Media API is rate-limited.", true],
+    ["CAPTURE_IMAGE_VIA_MEDIA_CACHE", "download", "Capture Images via Cache", "Keeps recently seen image URLs as fallbacks for missing or expired downloads.", true],
+    ["DOWNLOAD_ORIGINAL_QUALITY", "download", "Download Original Quality", "Uses the largest image variant actually offered by the page; signed URLs are not modified.", true],
+    ["FORCE_RESOURCE_VIA_MEDIA", "download", "Fetch via Media API", "Allows optional metadata lookups for complete media lists and DASH. Turn off for page-only post extraction.", true],
+    ["PREFER_DASH_MANIFEST", "download", "Prefer DASH Manifest", "Merges supported, complete MP4 video and audio tracks; otherwise uses the offered progressive file.", true],
+    ["FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED", "download", "Use Offered Story Link on API Failure", "Uses a link already provided for this story if the optional quality lookup fails or is rate-limited. Does not retry access denials.", true],
     ["MODIFY_RESOURCE_EXIF", "download", "Add EXIF Metadata", "Adds post URL, date and author to image EXIF.", true],
     ["DOWNLOAD_WITH_CAPTION", "download", "Download with Caption (.txt)", "Also saves the post caption as a .txt file alongside the media.", false],
     ["DIRECT_DOWNLOAD_ALL", "download", "Direct Download All", "Downloads every item of a post immediately, without a dialog.", false],
@@ -135,17 +117,17 @@
   const POST_CACHE_MAX_ITEMS = 30;
   const POST_CACHE_MAX_AGE = 10 * 60 * 1000;
 
+  // Persistent caches live in IndexedDB (see part6). Settings stay in GM storage.
   const PERSISTENT_CACHE_DB_NAME = "IGNIS";
   const PERSISTENT_CACHE_DB_VERSION = 1;
   const PERSISTENT_CACHE_STORE_NAME = "DATA_CACHE";
   const PERSISTENT_CACHE_FLUSH_DELAY = 500;
-
+  // Cache key -> `state` field holding its in-memory copy.
   const PERSISTENT_CACHE_BINDINGS = {
     [IMAGE_CACHE_KEY]: "GL_imageCache",
     [USER_ID_CACHE_KEY]: "GL_userIdCache",
   };
 
-  const HASTE_BITMAP_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
 
   const SVG = {
     DOWNLOAD: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>',
@@ -162,10 +144,11 @@
   const resourceCountSelector =
     "*:not([data-pagelet])>*:not([role]):not([data-pagelet])>*>*>*[role]>*>ul[class] li[class]";
   const userIdCache = new Map();
-
+  // Session-only hot cache for media discovered during the current page session.
   const mediaCache = new Map();
   let $body = $("body");
 
+  // Runtime state of the IndexedDB cache manager (see part6).
   const persistentCacheStore = {
     backend: null,
     db: null,
@@ -176,6 +159,7 @@
     flushChain: Promise.resolve(true),
   };
 
+  // ─── State ─────────────────────────────────────────────────────────────
   const state = {
     fileRenameFormat:
       "%USERNAME%-%SOURCE_TYPE%-%SHORTCODE%-%YEAR%%MONTH%%DAY%_%HOUR%%MINUTE%%SECOND%_%ORIGINAL_NAME_FIRST%",
@@ -189,11 +173,10 @@
     postPoll: null,
     homepageObserverDebounce: null,
     GL_storyConfirmSkipped: false,
-    GL_dataCache: { stories: {}, highlights: {}, posts: {}, taggedProfiles: {} },
-    GL_payloadCache: {},
+    GL_dataCache: { stories: Object.create(null), highlights: Object.create(null) },
+    GL_payloadCache: Object.create(null),
     GL_imageCache: {},
     GL_userIdCache: {},
-    GL_mediaDataCache: {},
     busy: 0,
     _igTab: "download",
     settingsHotkeyKeyCode: 87,
@@ -202,29 +185,87 @@
     bodyEventsRegistered: false,
   };
 
+  // ─── Storage (crash-safe) ──────────────────────────────────────────────
+  const modernGM=typeof GM === "undefined" ? {} : GM;
+  const manager = {
+    xhr: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : modernGM.xmlHttpRequest?.bind(modernGM),
+    download: typeof GM_download === "function" ? GM_download : modernGM.download?.bind(modernGM),
+    open: typeof GM_openInTab === "function" ? GM_openInTab : modernGM.openInTab?.bind(modernGM),
+    notify: typeof GM_notification === "function" ? GM_notification : modernGM.notification?.bind(modernGM),
+    menu:
+      typeof GM_registerMenuCommand === "function"
+        ? GM_registerMenuCommand
+        : modernGM.registerMenuCommand?.bind(modernGM),
+    unmenu:
+      typeof GM_unregisterMenuCommand === "function"
+        ? GM_unregisterMenuCommand
+        : modernGM.unregisterMenuCommand?.bind(modernGM)
+  };
   const Store = {
+    snapshot: new Map(),
+    async warm() {
+      if (typeof GM_getValue === "function" || !modernGM.getValue) return;
+      const keys = [
+        ...Object.keys(USER_SETTING),
+        STATS_KEY,
+        IMAGE_CACHE_KEY,
+        USER_ID_CACHE_KEY,
+        "G_RENAME_FORMAT",
+        "G_HOTKEY_SETTINGS_KEYCODE",
+        "G_HOTKEY_DEBUG_KEYCODE",
+        "G_HOTKEY_DOWNLOAD_STORY_KEYCODE",
+        "G_HOTKEY_DOWNLOADSTORY_KEYCODE"
+      ];
+      await Promise.all(
+        keys.map(async (k) => {
+          try {
+            const v = await modernGM.getValue(k);
+            if (v !== undefined) this.snapshot.set(k, v);
+          } catch (_) {
+            /* memory-only */
+          }
+        })
+      );
+    },
     get(key, fallback) {
       try {
-        const v = GM_getValue(key, fallback);
+        const v = typeof GM_getValue === "function" ? GM_getValue(key, fallback) : this.snapshot.get(key);
         return v === undefined ? fallback : v;
-      } catch (e) {
+      } catch (_) {
         return fallback;
       }
     },
+    write(key, value) {
+      if (typeof GM_setValue === "function") return GM_setValue(key, value);
+      this.snapshot.set(key, value);
+      if (!modernGM.setValue) throw new Error("Manager storage unavailable");
+      return modernGM.setValue(key, value);
+    },
     set(key, value) {
       try {
-        GM_setValue(key, value);
-      } catch (e) {
-
+        Promise.resolve(this.write(key, value)).catch(() => {});
+      } catch (_) {
+        /* session settings still work */
+      }
+    },
+    async remove(key) {
+      try {
+        if (typeof GM_deleteValue === "function") await GM_deleteValue(key);
+        else if (modernGM.deleteValue) await modernGM.deleteValue(key);
+        else await this.write(key, {});
+        this.snapshot.delete(key);
+      } catch (_) {
+        /* keep the original until durable migration succeeds */
       }
     },
     loadImageCache() {
       const raw = this.get(IMAGE_CACHE_KEY, {});
       if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw;
       return {};
-    },
+    }
   };
 
+  // ─── Download statistics (local-only) ──────────────────────────────────
   const STATS_KEY = "IGNIS_STATS_V1";
   const Stats = {
     _data: null,
@@ -234,7 +275,21 @@
     _load() {
       if (!this._data) {
         var d = Store.get(STATS_KEY, null);
-        this._data = d && typeof d === "object" && d.v === 1 && d.byType && d.byDay ? d : this._blank();
+        const clean = this._blank(),
+          count = (n) => (Number.isSafeInteger(n) && n >= 0 ? n : 0);
+        if (d?.v === 1) {
+          for (const key of ["sessions", "bytes", "items", "lastAt"]) clean[key] = count(d[key]);
+          clean.firstDay = count(d.firstDay) || clean.firstDay;
+          for (const [k, v] of Object.entries(d.byType || {}))
+            if (/^(photo|video|post|reels|stories|highlights|thumbnail|avatar|caption|other)$/.test(k))
+              clean.byType[k] = count(v);
+          for (const k of Object.keys(d.byDay || {})
+            .filter((k) => /^\d{4}-\d\d-\d\d$/.test(k))
+            .sort()
+            .slice(-90))
+            clean.byDay[k] = count(d.byDay[k]);
+        }
+        this._data = clean;
       }
       return this._data;
     },
@@ -242,10 +297,11 @@
       try {
         Store.set(STATS_KEY, this._data);
       } catch (e) {
-
+        /* storage full or disabled */
       }
     },
     session() {
+      if (!USER_SETTING.TRACK_DOWNLOAD_STATS) return;
       var d = this._load();
       d.sessions++;
       this._save();
@@ -272,9 +328,10 @@
     reset() {
       this._data = this._blank();
       this._save();
-    },
+    }
   };
 
+  // ─── Logging ───────────────────────────────────────────────────────────
   function logger() {
     var msg = Array.prototype.slice.call(arguments);
     if (state.GL_logger.length > 500) {
@@ -286,10 +343,11 @@
     try {
       console.log("[" + new Date().toISOString() + "]", "[" + NAME + "]", msg.join(" "));
     } catch (e) {
-
+      /* console blocked */
     }
   }
 
+  // ─── Small utils ───────────────────────────────────────────────────────
   function esc(s) {
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;")
@@ -303,18 +361,25 @@
   }
 
   function normTs(ts) {
-    if (ts == null || isNaN(ts)) return Math.floor(Date.now() / 1000);
+    if (ts == null || !Number.isFinite(Number(ts)) || Number(ts) <= 0) return Math.floor(Date.now() / 1000);
     ts = Number(ts);
-    return ts > 1e12 ? Math.floor(ts / 1000) : Math.floor(ts);
+    return ts > 1e11 ? Math.floor(ts / 1000) : Math.floor(ts);
   }
 
   function sanitizeFilename(name) {
-    return String(name == null ? "" : name)
+    let stem = String(name == null ? "" : name)
       .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
       .replace(/[. ]+$/g, "")
       .replace(/\s+/g, " ")
       .trim()
-      .slice(0, 180);
+      .slice(0, 180)
+      .replace(/[\u202a-\u202e\u2066-\u2069]/g, "")
+      .replace(/[. ]+$/g, "");
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)) stem = "_" + stem;
+    // Leave space for the extension even on byte-limited filesystems.
+    const enc = new TextEncoder();
+    while (enc.encode(stem).length > 220) stem = Array.from(stem).slice(0, -1).join("");
+    return stem;
   }
 
   function isMacOS() {
@@ -326,24 +391,76 @@
   }
 
   function makeButton(icon, title, cls) {
-    return $(
-      '<div class="' + cls + '" role="button" tabindex="0" aria-label="' + esc(title) + '" title="' + esc(title) + '">' + icon + "</div>"
-    );
+    return $('<button type="button">').addClass(cls).attr({ "aria-label": title, title: title }).html(icon);
+  }
+
+  // Validate the authority but return the original signed URL, not a serialized rewrite.
+  function trustedURL(raw, media = true) {
+    if (typeof raw !== "string") return null;
+    const value = raw.trim();
+    try {
+      const u = new URL(value);
+      const domains = media ? ["instagram.com", "cdninstagram.com", "fbcdn.net"] : ["instagram.com"];
+      if (
+        u.protocol !== "https:" ||
+        u.username ||
+        u.password ||
+        u.port ||
+        !domains.some((d) => u.hostname === d || u.hostname.endsWith("." + d))
+      )
+        return null;
+      return value;
+    } catch (_) {
+      return null;
+    }
   }
 
   function openNewTab(link) {
-    if (!link) return;
-    var a = document.createElement("a");
-    a.href = link;
+    const href = trustedURL(link);
+    if (!href) {
+      Toasts.error("No supported media link is available.");
+      return false;
+    }
+    if (manager.open) {
+      try {
+        Promise.resolve(manager.open(href, { active: false, insert: true })).catch(() =>
+          Toasts.error("Could not open the media tab.")
+        );
+        return true;
+      } catch (_) {
+        /* Use the native link below. */
+      }
+    }
+    const a = document.createElement("a");
+    a.href = href;
     a.target = "_blank";
-    a.rel = "noopener";
+    a.rel = "noopener noreferrer";
     document.body.appendChild(a);
     a.click();
     a.remove();
+    return true;
   }
 
+  function postCode(href) {
+    try {
+      const u = new URL(href || "", location.href);
+      if (!href || !trustedURL(u.href, false)) return null;
+      return u.pathname.match(/^\/(?:[a-zA-Z0-9_.]+\/)?(?:p|reel|reels)\/([A-Za-z0-9_-]{1,32})\/?$/)?.[1] || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function positionHost(el) {
+    if (el && getComputedStyle(el).position === "static") el.classList.add("ignis-position-host");
+  }
+
+  // ─── Username extraction (multi-strategy) ──────────────────────────────
   function cleanName(t) {
-    t = (t || "").replace(/^@/, "").trim().toLowerCase();
+    t = String(t ?? "")
+      .replace(/^@/, "")
+      .trim()
+      .toLowerCase();
     return /^[a-zA-Z0-9_.]{1,30}$/.test(t) ? t : null;
   }
 
@@ -437,7 +554,7 @@
       })
       .first()
       .attr("href");
-    var u = cleanName(name);
+    var u = cleanName((name || "").split("/").filter(Boolean)[0]);
     if (u) return u;
 
     name = $('body > div section:visible header a[href^="/"]')
@@ -454,91 +571,35 @@
     return getStoryUsername();
   }
 
-  function sortCandidatesDescending(candidates, widthKey, stpKey) {
-    if (!Array.isArray(candidates)) return candidates || [];
-    return candidates
-      .map(function (c) {
-        return c;
-      })
-      .sort(function (a, b) {
-        if (stpKey) {
-          var aStp = "",
-            bStp = "";
-          try {
-            aStp = new URL(a.url || a.src).searchParams.get("stp") || "";
-            bStp = new URL(b.url || b.src).searchParams.get("stp") || "";
-          } catch (e) {
-
-          }
-          if (aStp && bStp && aStp.length !== bStp.length) return bStp.length - aStp.length;
-        }
-        var aW = a[widthKey] || a.config_width || 0;
-        var bW = b[widthKey] || b.config_width || 0;
-        return bW - aW;
-      });
-  }
-
+  // ─── Story container detection ─────────────────────────────────────────
   function findStoryContainer() {
-    if ($("body > div section._ac0a").length > 0) {
-      return $("body > div section:visible._ac0a");
-    }
-    var $c = $("body > div section:visible > div > div[style]:not([class])");
-    if ($c.length) {
-      $c.css("position", "relative");
-      return $c;
-    }
-    var $mount = $('div[id^="mount"] section > div > a[href="/"]');
-    if ($mount.length) {
-      var $d = $mount
-        .parent()
-        .parent()
-        .parent()
-        .find("section:visible > div > div[style]:not([class])");
-      if ($d.length) {
-        $d.css("position", "relative");
-        return $d;
-      }
-      var $e = $mount
-        .parent()
-        .parent()
-        .parent()
-        .find(
-          'section:visible > div div[style]:not([class]) > div:not([data-visualcompletion="loading-state"])'
-        );
-      if ($e.length) {
-        $e.css("position", "relative");
-        return $e;
-      }
-      var $f = $mount.parents("section:visible").find("div[style]:not([class])");
-      if ($f.length) {
-        $f.css("position", "relative");
-        return $f;
-      }
-    }
-    var $g = $(
-      "body > div div:not([hidden]) section:visible > div div[class][style] > div[style]:not([class])"
-    );
-    if ($g.length) {
-      var best = null,
-        bestW = -1;
-      $g.each(function () {
-        var w = $(this).width();
-        if (w > bestW) {
-          bestW = w;
-          best = $(this);
-        }
-      });
-      if (best) return best.children("div").first();
-    }
-    return null;
+    // Instagram may keep adjacent stories mounted. Only add controls to the
+    // on-screen section nearest the viewport centre, not every matching node.
+    const sections = Array.from(document.querySelectorAll("section")).filter((s) => s.querySelector("video, img"));
+    const ranked = sections
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        return {
+          el,
+          area:
+            Math.max(0, Math.min(innerWidth, r.right) - Math.max(0, r.left)) *
+            Math.max(0, Math.min(innerHeight, r.bottom) - Math.max(0, r.top)),
+          distance: Math.abs(r.left + r.right - innerWidth)
+        };
+      })
+      .filter((s) => s.area > 0)
+      .sort((a, b) => a.distance - b.distance || b.area - a.area);
+    return $(ranked[0]?.el || []);
   }
 
+  // ─── Loading bar / progress helpers ────────────────────────────────────
   function updateLoadingBar(isLoading) {
     state.busy = Math.max(0, state.busy + (isLoading ? 1 : -1));
     if (state.busy > 0) Progress.show();
-    else Progress.hide();
+    else if (!state.batchActive) Progress.hide();
   }
 
+  // ─── Toast + notification system ───────────────────────────────────────
   const Toasts = (function () {
     var stack = [];
     var host = null;
@@ -597,12 +658,14 @@
 
   function notify(title, text) {
     try {
-      GM_notification({ title: title, text: text || "", timeout: 5000 });
+      if (!manager.notify) throw Error("No manager notifications");
+      Promise.resolve(manager.notify({ title, text: text || "", timeout: 5000 })).catch(() => Toasts.info(text));
     } catch (e) {
       Toasts.info((title || "") + (text ? " — " + text : ""));
     }
   }
 
+  // ─── Progress overlay ───────────────────────────────────────────────────
   const Progress = (function () {
     var el = null;
     var label = null;
@@ -623,21 +686,18 @@
         ensure().classList.add("ignis-progress-on");
       },
       hide: function () {
-        if (el) el.classList.remove("ignis-progress-on");
+        if (el) {el.classList.remove("ignis-progress-on"); label.textContent="";}
       },
       set: function (now, total) {
         ensure();
         label.textContent = now + "/" + total;
         this.show();
-        if (now >= total) {
-          setTimeout(function () {
-            Progress.hide();
-          }, 700);
-        }
+
       },
     };
   })();
 
+  // ─── Persistent settings boot ───────────────────────────────────────────
   function initSettings() {
     Object.keys(USER_SETTING).forEach(function (name) {
       var v = Store.get(name, null);
@@ -648,16 +708,23 @@
     var hotkeys = [
       ["G_HOTKEY_SETTINGS_KEYCODE", "settingsHotkeyKeyCode"],
       ["G_HOTKEY_DEBUG_KEYCODE", "debugHotkeyKeyCode"],
-      ["G_HOTKEY_DOWNLOAD_STORY_KEYCODE", "downloadStoryHotkeyKeyCode"],
+      ["G_HOTKEY_DOWNLOAD_STORY_KEYCODE", "downloadStoryHotkeyKeyCode"]
     ];
     hotkeys.forEach(function (pair) {
-      var v = Store.get(pair[0], null);
-      if (typeof v === "number") state[pair[1]] = v;
+      var v = Store.get(
+        pair[0],
+        pair[1] === "downloadStoryHotkeyKeyCode" ? Store.get("G_HOTKEY_DOWNLOADSTORY_KEYCODE", null) : null
+      );
+      if (Number.isInteger(v) && v >= 65 && v <= 90) state[pair[1]] = v;
     });
-    state.GL_imageCache = Store.loadImageCache();
+    state.GL_imageCache = mergeCacheEntries(IMAGE_CACHE_KEY, Store.loadImageCache());
     var cachedIds = Store.get(USER_ID_CACHE_KEY, null);
-    state.GL_userIdCache = cachedIds && typeof cachedIds === "object" && !Array.isArray(cachedIds) ? cachedIds : {};
+    state.GL_userIdCache = mergeCacheEntries(USER_ID_CACHE_KEY, cachedIds);
   }
+
+  /* ============================================================
+     Ignis Lens — media detection & extraction
+     ============================================================ */
 
   function decodeMediaIdFromUrl(url) {
     try {
@@ -665,8 +732,8 @@
       var key = u.searchParams.get("ig_cache_key");
       if (key) {
         var raw = atob(key.split(".")[0].replace(/-/g, "+").replace(/_/g, "/"));
-        if (/^\d+$/.test(raw)) return raw.length > 19 ? raw.slice(0, 19) : raw;
-        return raw || null;
+        const match = /^(\d{1,30})(?:_\d+)?$/.exec(raw);
+        if (match) return match[1];
       }
       var filename = u.pathname.split("/").filter(Boolean).pop() || "";
       var parts = filename.split(".")[0].split("_");
@@ -683,184 +750,113 @@
   }
 
   function parseSrcset(srcset) {
-    if (!srcset) return [];
-    return srcset
-      .split(",")
-      .map(function (part) {
-        var bits = part.trim().split(/\s+/);
-        return { url: bits[0], width: parseInt(bits[1], 10) || 0 };
-      })
-      .filter(function (e) {
-        return e.url;
-      });
-  }
-
-  function stripSizeConstraints(url) {
-    if (!url) return url;
-    return url.replace(/[\/_]s\d+x\d+/g, "").replace(/s\d+x\d+/g, "s1080x1080");
-  }
-
-  function pickImage(candidates) {
-    if (!Array.isArray(candidates) || !candidates.length) return null;
-    var best = null;
-    candidates.forEach(function (c) {
-      var url = c.url || c.src || null;
-      if (!url) return;
-      var w = c.width || c.config_width || 0;
-      if (!best || w > best.width) best = { url: url, width: w };
-    });
-    if (!best) return null;
-    return USER_SETTING.DOWNLOAD_ORIGINAL_QUALITY ? stripSizeConstraints(best.url) : best.url;
-  }
-
-  function pickVideo(versions) {
-    if (!Array.isArray(versions) || !versions.length) return null;
-    var best = null;
-    versions.forEach(function (v) {
-      var url = v.url || v.src || null;
-      if (!url) return;
-      var area = (v.width || 0) * (v.height || 0);
-      if (!best || area > best.area) best = { url: url, area: area };
-    });
-    return best ? best.url : null;
-  }
-
-  function thumbFromDisplayResources(resources) {
-    if (!Array.isArray(resources) || !resources.length) return null;
-    var widthKey = resources[0] && resources[0].config_width != null ? "config_width" : "width";
-    var sorted = sortCandidatesDescending(resources, widthKey);
-    var best = sorted[0];
-    return best ? best.src || best.url || null : null;
-  }
-
-  function captionOf(item) {
-    if (!item) return null;
-    if (typeof item.caption === "string") return item.caption || null;
-    if (item.caption && typeof item.caption === "object" && item.caption.text) return item.caption.text;
-    if (item.edge_media_to_caption && item.edge_media_to_caption.edges && item.edge_media_to_caption.edges[0]) {
-      return item.edge_media_to_caption.edges[0].node.text || null;
+    const result = [];
+    for (const m of String(srcset || "").matchAll(/(?:^|,\s*)(\S+?)\s+(\d+(?:\.\d+)?)([wx])(?=\s*(?:,|$))/g)) {
+      if (trustedURL(m[1])) result.push({ url: m[1], width: Number(m[2]) });
     }
-    return null;
+    return result.sort((a, b) => a.width - b.width);
   }
 
+  function candidates(list) {
+    return (Array.isArray(list) ? list : [])
+      .filter(Boolean)
+      .map((c) => ({
+        url: trustedURL(c.url || c.src),
+        width: Number(c.width || c.config_width) || 0,
+        height: Number(c.height || c.config_height) || 0
+      }))
+      .filter((c) => c.url);
+  }
+  function bestImage(list) {
+    const valid = candidates(list);
+    return (USER_SETTING.DOWNLOAD_ORIGINAL_QUALITY ? valid.sort((a, b) => b.width - a.width) : valid)[0] || null;
+  }
+  function domImage(img) {
+    if (!img) return null;
+    const set = parseSrcset(img.getAttribute("srcset"));
+    return (
+      (USER_SETTING.DOWNLOAD_ORIGINAL_QUALITY && set.at(-1)?.url) ||
+      trustedURL(img.currentSrc || img.src) ||
+      set.at(-1)?.url ||
+      null
+    );
+  }
+  function mediaExtension(url, fallback) {
+    try {
+      return (
+        new URL(url).pathname
+          .match(/\.(jpe?g|webp|png|avif|gif|mp4|webm)$/i)?.[1]
+          .toLowerCase()
+          .replace("jpeg", "jpg") || fallback
+      );
+    } catch (_) {
+      return fallback;
+    }
+  }
+  function captionOf(item) {
+    const text = item?.caption?.text ?? item?.caption ?? item?.edge_media_to_caption?.edges?.[0]?.node?.text;
+    return typeof text === "string" ? text : null;
+  }
+  function normalizeItem(node, index) {
+    if (!node || typeof node !== "object") return null;
+    const isVideo = isReelsMediaVideo(node);
+    const image = bestImage([
+      ...(Array.isArray(node.display_resources) ? node.display_resources : []),
+      ...(Array.isArray(node.image_versions2?.candidates) ? node.image_versions2.candidates : [])
+    ]) || { url: trustedURL(node.display_url || node.display_src), width: 0, height: 0 };
+    const videos = [...candidates(node.video_versions), ...candidates(node.video_resources)].sort(
+      (a, b) => b.width * b.height - a.width * a.height || b.width - a.width
+    );
+    const best = isVideo ? videos[0] || { url: trustedURL(node.video_url), width: 0, height: 0 } : image;
+    const dash = isVideo && typeof node.video_dash_manifest === "string" ? node : null;
+    if (!best.url) {
+      const tracks = dash && parseDashManifest(dash.video_dash_manifest);
+      if (!tracks?.video) return null;
+      // With no progressive alternative and no audio adaptation, this full video
+      // is the only offered file. Never treat a single segment as that file.
+      if (!tracks.audio) best.url = tracks.video.url;
+    }
+    return {
+      id: String(node.pk ?? node.id ?? node.media_id ?? ""),
+      isVideo,
+      url: best.url,
+      thumb: image.url,
+      width: best.width || Number(node.dimensions?.width) || 0,
+      height: best.height || Number(node.dimensions?.height) || 0,
+      takenAt: node.taken_at_timestamp || node.taken_at || null,
+      caption: captionOf(node),
+      dash,
+      ext: mediaExtension(best.url, isVideo ? "mp4" : "jpg"),
+      _igSourceIndex: index + 1
+    };
+  }
   function normalizePostResource(resource) {
-    var out = { username: null, shortcode: null, takenAt: null, caption: null, items: [] };
+    const out = { username: null, uid: null, shortcode: null, takenAt: null, caption: null, items: [] };
     if (!resource) return out;
-    out.username = (resource.owner && resource.owner.username) || (resource.user && resource.user.username) || null;
+    const author = resource.owner || resource.user;
+    out.username = author?.username || null;
+    out.uid = author?.pk || author?.id || null;
     out.shortcode = resource.shortcode || resource.code || null;
     out.takenAt = resource.taken_at_timestamp || resource.taken_at || null;
     out.caption = captionOf(resource);
-    if (out.caption && typeof out.caption === "string") out.caption = out.caption.slice(0, 4000);
-
-    var push = function (node) {
-      var it = {
-        id: node.pk || node.id || String(node.media_id || ""),
-        isVideo: isReelsMediaVideo(node),
-        url: null,
-        thumb: null,
-        width: 0,
-        height: 0,
-        caption: captionOf(node),
-        dash: node.video_dash_manifest ? node : null,
-        ext: null,
-      };
-      if (it.isVideo) {
-        var versions = node.video_versions && node.video_versions.length ? node.video_versions : null;
-        var vRes = node.video_resources && node.video_resources.length ? node.video_resources : null;
-        var vUrl = pickVideo(versions) || pickVideo(vRes) || node.video_url || null;
-        if (vUrl) {
-          it.url = vUrl;
-          it.ext = "mp4";
-          if (versions && versions[0]) {
-            it.width = versions[0].width || 0;
-            it.height = versions[0].height || 0;
-          }
-          if (vRes && vRes[0]) {
-            it.width = it.width || vRes[0].config_width || 0;
-            it.height = it.height || vRes[0].config_height || 0;
-          }
-          it.thumb = thumbFromDisplayResources(node.display_resources) ||
-            thumbFromDisplayResources(node.image_versions2 && node.image_versions2.candidates) ||
-            node.display_url || null;
-        }
-      } else {
-        var imgUrl = pickImage(node.display_resources) ||
-          pickImage(node.image_versions2 && node.image_versions2.candidates) ||
-          node.display_url || node.display_src || null;
-        if (imgUrl) {
-          it.url = imgUrl;
-          it.ext = /\.webp(\?|$)/i.test(imgUrl) ? "webp" : "jpg";
-          it.thumb = it.url;
-          var bestImg = sortCandidatesDescending(node.image_versions2 && node.image_versions2.candidates, "width");
-          if (bestImg && bestImg[0]) {
-            it.width = bestImg[0].width || 0;
-            it.height = bestImg[0].height || 0;
-          } else if (node.display_resources && node.display_resources.length) {
-            it.width = node.display_resources[node.display_resources.length - 1].config_width || 0;
-            it.height = node.display_resources[node.display_resources.length - 1].config_height || 0;
-          }
-        }
-      }
-      if (it.url) out.items.push(it);
-    };
-
-    if (resource.__typename === "GraphSidecar") {
-      (resource.edge_sidecar_to_children && resource.edge_sidecar_to_children.edges || []).forEach(function (e) {
-        push(e.node);
-      });
-    } else if (resource.carousel_media && resource.carousel_media.length) {
-      resource.carousel_media.forEach(push);
-    } else {
-      push(resource);
-    }
+    const edges = resource.edge_sidecar_to_children?.edges;
+    const children = Array.isArray(edges)
+      ? edges.map((e) => e?.node)
+      : Array.isArray(resource.carousel_media)
+        ? resource.carousel_media
+        : [resource];
+    out.items = children.map(normalizeItem).filter(Boolean);
     return out;
   }
-
   function normalizeReelItems(items) {
-    return (items || []).map(function (item) {
-      var it = {
-        id: item.pk || item.id || "",
-        isVideo: isReelsMediaVideo(item),
-        url: null,
-        thumb: null,
-        width: 0,
-        height: 0,
-        takenAt: item.taken_at_timestamp || item.taken_at || null,
-        caption: typeof item.caption === "string" ? item.caption : null,
-        dash: item.video_dash_manifest ? item : null,
-        ext: "jpg",
-      };
-      if (it.isVideo) {
-        var vUrl = pickVideo(item.video_resources) || (item.video_versions && item.video_versions.length ? pickVideo(item.video_versions) : null);
-        if (vUrl) {
-          it.url = vUrl;
-          it.ext = "mp4";
-        }
-        it.thumb = thumbFromDisplayResources(item.display_resources) ||
-          thumbFromDisplayResources(item.image_versions2 && item.image_versions2.candidates) ||
-          item.display_url || null;
-      } else {
-        var imgUrl = pickImage(item.display_resources) ||
-          pickImage(item.image_versions2 && item.image_versions2.candidates) ||
-          item.display_url || null;
-        if (imgUrl) {
-          it.url = imgUrl;
-          it.thumb = it.url;
-        }
-      }
-      var bestCand = sortCandidatesDescending(item.image_versions2 && item.image_versions2.candidates, "width");
-      if (bestCand && bestCand[0]) {
-        it.width = bestCand[0].width || 0;
-        it.height = bestCand[0].height || 0;
-      }
-      return it;
-    }).filter(function (it) {
-      return it.url;
-    });
+    return Array.isArray(items) ? items.map(normalizeItem).filter(Boolean) : [];
   }
 
+  /* ============================================================
+     Ignis Fetch — API layer (timeouts, retries, safe parsing)
+     ============================================================ */
+
   let cachedAppId = null;
-  let graphQLContextCache = { ts: 0, siteData: null, haste: null };
 
   function getAppId(force) {
     if (cachedAppId && !force) return cachedAppId;
@@ -884,7 +880,7 @@
         });
       }
     } catch (e) {
-
+      /* ignore */
     }
     cachedAppId = result || FALLBACK_APP_ID;
     return cachedAppId;
@@ -911,342 +907,93 @@
     return result;
   }
 
-  function getBloks() {
-    var result = null;
-    $('script[type="application/json"][data-sjs]').each(function () {
-      var m = (this.textContent || "").match(/"WebBloksVersioningID",\[\],\{"versioningID":"([0-9a-z_-]+)"\}/i);
-      if (m && !result) {
-        result = m[1];
-        return false;
-      }
+  // Read-only metadata requests are ordinary same-origin browser requests.
+  // No manufactured session IDs, forged client hints, cookie forwarding or
+  // alternate account is needed. Session tokens are never sent to media CDNs.
+  function graphQLRequest(docId, variables, friendlyName, rootName) {
+    const body = new URLSearchParams({
+      doc_id: docId,
+      variables: JSON.stringify(variables),
+      fb_api_req_friendly_name: friendlyName
     });
-    return result;
-  }
-
-  function getDTSG() {
-    var result = null;
-    $('script[type="application/json"][data-sjs]').each(function () {
-      var m = (this.textContent || "").match(/"DTSGInitialData",\[\],\{"token":"([0-9a-z_:-]+)"\}/i);
-      if (m && !result) {
-        result = m[1];
-        return false;
-      }
-    });
-    return result;
-  }
-
-  function findConfig(data, name) {
-    var stack = [data];
-    while (stack.length) {
-      var node = stack.pop();
-      if (Array.isArray(node)) {
-        if (node[0] === name && node.length >= 3 && node[2] && typeof node[2] === "object" && !Array.isArray(node[2])) {
-          return node[2];
-        }
-        stack.push.apply(stack, node);
-      } else if (node && typeof node === "object") {
-        stack.push.apply(stack, Object.values(node));
-      }
+    const lsd = getLSD(),
+      headers = { "X-IG-App-ID": getAppId(), "X-Fb-Friendly-Name": friendlyName };
+    const csrf = getCookie("csrftoken");
+    if (csrf) headers["X-CSRFToken"] = csrf;
+    if (lsd) {
+      body.set("lsd", lsd);
+      headers["X-Fb-Lsd"] = lsd;
     }
-    return null;
-  }
-
-  function getSiteData() {
-    var text = null;
-    $('script[type="application/json"][data-sjs]').each(function () {
-      var t = this.textContent || "";
-      if (/"SiteData",\[\],\{/i.test(t)) {
-        text = t;
-        return false;
-      }
-    });
-    if (!text) return null;
-    try {
-      return findConfig(JSON.parse(text), "SiteData");
-    } catch (e) {
-      return null;
-    }
-  }
-
-  function getJazoest(fbDtsg) {
-    if (!fbDtsg) return "";
-    var sum = 0;
-    for (var i = 0; i < fbDtsg.length; i++) sum += fbDtsg.charCodeAt(i);
-    return "2" + sum;
-  }
-
-  function encodeHasteBitMap(indexes) {
-    var bits = [];
-    indexes.forEach(function (index) {
-      if (Number.isInteger(index) && index >= 0) bits[index] = 1;
-    });
-    if (!bits.length) return "";
-    var gamma = function (num) {
-      var binary = num.toString(2);
-      return "0".repeat(binary.length - 1) + binary;
-    };
-    var lastValue = bits[0] || 0;
-    var runLength = 1;
-    var output = String(lastValue);
-    for (var i = 1; i < bits.length; i++) {
-      var value = bits[i] || 0;
-      if (value === lastValue) runLength++;
-      else {
-        output += gamma(runLength);
-        lastValue = value;
-        runLength = 1;
-      }
-    }
-    output += gamma(runLength);
-    var chunks = (output + "00000").match(/[01]{6}/g) || [];
-    return chunks
-      .map(function (chunk) {
-        return HASTE_BITMAP_ALPHABET[parseInt(chunk, 2)];
-      })
-      .join("");
-  }
-
-  function parseHasteResourceIndexes(value) {
-    if (typeof value !== "string" || value[0] !== ":") return [];
-    return value
-      .slice(1)
-      .split(",")
-      .map(function (item) {
-        return parseInt(item, 10);
-      })
-      .filter(Number.isInteger);
-  }
-
-  function getHasteBitMapParams() {
-    var dynIndexes = new Set();
-    var hasteIndexes = { __csr: new Set(), __hsdp: new Set(), __hblp: new Set(), __sjsp: new Set() };
-    var addHasteIndex = function (name, index) {
-      if (!hasteIndexes[name]) hasteIndexes[name] = new Set();
-      hasteIndexes[name].add(index);
-    };
-    var resources = [];
-    var csrOn = true;
-
-    var isDefineList = function (value) {
-      return Array.isArray(value) &&
-        value.every(function (entry) {
-          return Array.isArray(entry) && typeof entry[0] === "string";
-        });
-    };
-
-    var walk = function (data) {
-      var stack = [data];
-      while (stack.length) {
-        var node = stack.pop();
-        if (Array.isArray(node)) {
-          if (node[0] === "AsyncData" && node[1] === "resolve") continue;
-          if (node[0] === "BootloaderConfig" && node[2] && typeof node[2] === "object" && "csrOn" in node[2]) {
-            csrOn = !!node[2].csrOn;
-          }
-          stack.push.apply(stack, node);
-          continue;
-        }
-        if (!node || typeof node !== "object") continue;
-        if (isDefineList(node.define)) {
-          node.define.forEach(function (entry) {
-            if (Number.isInteger(entry[3]) && entry[3] >= 0) dynIndexes.add(entry[3]);
-          });
-        }
-        if (typeof node.phd2_indexes === "string") {
-          parseHasteResourceIndexes(node.phd2_indexes).forEach(function (index) {
-            addHasteIndex("__sjsp", index);
-          });
-        }
-        if (node.indexUpgrades && typeof node.indexUpgrades === "object") {
-          Object.keys(node.indexUpgrades).forEach(function (name) {
-            parseHasteResourceIndexes(node.indexUpgrades[name]).forEach(function (index) {
-              addHasteIndex(name, index);
-            });
-          });
-        }
-        if (node.rsrcMap && typeof node.rsrcMap === "object") {
-          resources.push.apply(resources, Object.values(node.rsrcMap));
-        }
-        stack.push.apply(stack, Object.values(node));
-      }
-    };
-
-    document.querySelectorAll('script[type="application/json"][data-sjs]').forEach(function (script) {
-      try {
-        walk(JSON.parse(script.textContent || ""));
-      } catch (e) {
-
-      }
-    });
-
-    document.querySelectorAll("script[data-bootloader-hash], link[data-bootloader-hash]").forEach(function (element) {
-      var c = element.getAttribute("data-c");
-      resources.push({
-        type: element.tagName === "LINK" ? "css" : "js",
-        p: element.getAttribute("data-p"),
-        c: c === "1" ? 1 : c === "2" ? 2 : 0,
-      });
-    });
-
-    if (csrOn) {
-      resources.forEach(function (resource) {
-        if (!resource || resource.type === "async" || resource.type === "csr" || resource.p == null || !resource.c) return;
-        parseHasteResourceIndexes(resource.p).forEach(function (index) {
-          if (index !== 0) addHasteIndex("__csr", index);
-        });
-      });
-    }
-
-    var result = {};
-    var dyn = encodeHasteBitMap(dynIndexes);
-    if (dyn) result.__dyn = dyn;
-    Object.keys(hasteIndexes).forEach(function (name) {
-      var value = encodeHasteBitMap(hasteIndexes[name]);
-      if (value) result[name] = value;
-    });
-    return result;
-  }
-
-  function genWebSessionId() {
-    var rand6 = function () {
-      return Math.floor(Math.random() * Math.pow(2, 31))
-        .toString(36)
-        .padStart(6, "0");
-    };
-    return rand6() + ":" + rand6() + ":" + rand6();
-  }
-
-  function getGraphQLContext() {
-    if (!graphQLContextCache.ts || Date.now() - graphQLContextCache.ts > 60000 || !graphQLContextCache.siteData) {
-      graphQLContextCache = {
-        ts: Date.now(),
-        siteData: getSiteData(),
-        haste: getHasteBitMapParams(),
-      };
-    }
-    return graphQLContextCache;
-  }
-
-  function buildGraphQLData(docId, variables, friendlyName, crn, rootName) {
-    var context = getGraphQLContext();
-    var siteData = context.siteData || {};
-    var hasteData = context.haste || {};
-    var lsd = getLSD();
-    var dtsg = getDTSG();
-    var bloks = getBloks();
-    var body = Object.assign(
-      {
-        av: getCookie("ds_user_id") || "0",
-        fb_api_caller_class: "RelayModern",
-        fb_api_req_friendly_name: friendlyName,
-        server_timestamps: "true",
-        doc_id: docId,
-        lsd: lsd || "",
-        fb_dtsg: dtsg || "",
-        __hs: siteData.haste_session || "",
-        __hsi: siteData.hsi || "",
-        __rev: siteData.client_revision || "",
-        __spin_r: siteData.__spin_r || "",
-        __spin_b: siteData.__spin_b || "",
-        __spin_t: siteData.__spin_t || "",
-        __comet_req: siteData.comet_env || "",
-        __ccg: "EXCELLENT",
-        dpr: "3",
-        jazoest: getJazoest(dtsg),
-        __user: "0",
-        __a: "1",
-        __d: "www",
-        __req: "1",
-        __s: genWebSessionId(),
-        variables: JSON.stringify(variables),
-      },
-      hasteData
-    );
-    if (crn) body.__crn = crn;
-
-    var headers = {
-      Accept: "*/*",
-      Dpr: "3",
-      "Sec-Ch-Dpr": "3",
-      "Viewport-Width": "3840",
-      "Sec-Ch-Viewport-Width": "3840",
-      "X-IG-App-ID": getAppId(),
-      "X-CSRFToken": getCookie("csrftoken"),
-      "X-Fb-Friendly-Name": friendlyName,
-      "X-Fb-Lsd": lsd || "",
-      "X-Asbd-ID": "359341",
-    };
-    if (bloks) headers["X-Bloks-Version-ID"] = bloks;
     if (rootName) headers["X-Root-Field-Name"] = rootName;
-
-    var formData = new FormData();
-    Object.keys(body).forEach(function (key) {
-      formData.append(key, body[key]);
-    });
-
-    return { url: new URL("/graphql/query", location.origin).href, body: formData, headers: headers };
+    return request(new URL("/graphql/query", location.origin).href, { method: "POST", data: body, headers });
   }
 
-  function graphQLRequest(docId, variables, friendlyName, crn, rootName) {
-    var api = buildGraphQLData(docId, variables, friendlyName, crn, rootName);
-    return request(api.url, {
-      method: "POST",
-      data: api.body,
-      headers: api.headers,
-      retries: 0,
-      timeout: 15000,
-    });
+  function accessError(message, status) {
+    const e = new Error(message);
+    e.status = status;
+    e.stopLookup = true;
+    return e;
   }
-
-  function androidHeaders() {
-    return {
-      "User-Agent":
-        "Mozilla/5.0 (Linux; Android 10; Pixel 7 XL)Build/RP1A.20845.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/119.0.0.0 Mobile Safari/537.36 Instagram 307.0.0.34.111 Android (30/11; 480dpi; 1080x2340; google; Pixel 7 XL; panther; qcom; en_US; 439103586)",
-      "X-IG-App-ID": getAppId(),
+  function fallbackUnlessDenied(fn) {
+    return (err) => {
+      if (err?.stopLookup) throw err;
+      return fn();
     };
   }
-
-  function request(url, opts) {
-    opts = opts || {};
-    var headers = Object.assign({ Accept: "application/json" }, opts.headers || {});
-    var attempts = (opts.retries != null ? opts.retries : 1) + 1;
-    var timeout = opts.timeout || 15000;
-    return new Promise(function (resolve, reject) {
-      function attempt(n) {
-        GM_xmlhttpRequest({
-          method: opts.method || "GET",
-          url: url,
-          headers: headers,
-          data: opts.data || null,
-          timeout: timeout,
-          onload: function (res) {
-            var obj = null;
-            try {
-              obj = JSON.parse(res.response);
-            } catch (e) {
-              if (n < attempts) return attempt(n + 1);
-              return reject(new Error("Invalid JSON response from API"));
-            }
-            resolve(obj);
+  function checkResponse(status, finalUrl, expected) {
+    if (status === 429) throw accessError("Instagram rate limit reached. Please try again later.", 429);
+    if (status === 401 || status === 403) throw accessError("Instagram did not grant access to this item.");
+    if (
+      finalUrl &&
+      (!trustedURL(finalUrl, false) ||
+        new URL(finalUrl).origin !== new URL(expected).origin ||
+        /^\/(accounts\/login|challenge|checkpoint|consent)(\/|$)/i.test(new URL(finalUrl).pathname))
+    )
+      throw accessError("Instagram requires a login or confirmation.");
+    if (status < 200 || status >= 300) throw new Error("Instagram returned HTTP " + status);
+  }
+  async function request(url, opts = {}) {
+    if (!trustedURL(url, false) || new URL(url).origin !== location.origin) throw new Error("Unsupported API origin");
+    const method = opts.method || "GET";
+    let remaining = method === "GET" ? Math.min(2, Math.max(0, Math.floor(Number(opts.retries) || 0))) : 0;
+    for (;;) {
+      let received = false;
+      try {
+        return await fetchWithTimeout(
+          url,
+          {
+            method,
+            credentials: "same-origin",
+            redirect: "manual",
+            headers: { Accept: "application/json", ...opts.headers },
+            body: opts.data
           },
-          onerror: function () {
-            if (n < attempts) return attempt(n + 1);
-            reject(new Error("Network error contacting Instagram"));
-          },
-          ontimeout: function () {
-            if (n < attempts) return attempt(n + 1);
-            reject(new Error("API request timed out"));
-          },
-        });
+          opts.timeout || 12000,
+          async (response) => {
+            received = true;
+            if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400))
+              throw accessError("Instagram requires a login or confirmation.");
+            checkResponse(response.status, response.url, url);
+            if (/text\/html/i.test(response.headers.get("content-type") || ""))
+              throw accessError("Instagram did not return media metadata.");
+            const value = await response.json();
+            if (!value || value.status === "fail" || value.errors?.length || value.checkpoint_url || value.challenge)
+              throw accessError("Instagram could not provide this item.");
+            return value;
+          }
+        );
+      } catch (e) {
+        if (received || remaining-- <= 0) throw e;
+        await new Promise((r) => setTimeout(r, 300));
       }
-      attempt(0);
-    });
+    }
   }
 
+  // ─── User ID resolution ────────────────────────────────────────────────
   function getUserIdViaSearch(username) {
-    return request("https://www.instagram.com/web/search/topsearch/?query=" + encodeURIComponent(username), {
+    return request(location.origin + "/web/search/topsearch/?query=" + encodeURIComponent(username), {
       retries: 0,
-      timeout: 12000,
+      timeout: 12000
     }).then(function (obj) {
       var users = (obj && obj.users) || [];
       for (var i = 0; i < users.length; i++) {
@@ -1258,11 +1005,11 @@
     });
   }
 
-  function getUserIdWithAgent(username) {
-    return request("https://i.instagram.com/api/v1/users/web_profile_info/?username=" + encodeURIComponent(username), {
+  function getUserIdFromProfileInfo(username) {
+    return request(location.origin + "/api/v1/users/web_profile_info/?username=" + encodeURIComponent(username), {
       headers: { "X-IG-App-ID": getAppId() },
       retries: 1,
-      timeout: 10000,
+      timeout: 10000
     }).then(function (obj) {
       var user = null;
       var hdUrl = null;
@@ -1277,7 +1024,7 @@
         hdUrl = obj.graphql.user.hd_profile_pic_url_info && obj.graphql.user.hd_profile_pic_url_info.url;
       }
       if (!user) throw new Error("No user data returned");
-      if (!user.username) user.username = username;
+      if (cleanName(user.username) !== cleanName(username)) throw accessError("Profile owner did not match");
       if (!user.pk && user.id) user.pk = user.id;
       if (!user.id && user.pk) user.id = user.pk;
       user._hdUrl = hdUrl || user.profile_pic_url_hd || null;
@@ -1285,35 +1032,50 @@
     });
   }
 
-  function fetchWithTimeout(url, options, timeoutMs) {
-    if (typeof AbortController === "undefined") return fetch(url, options);
+  function fetchWithTimeout(url, options, timeoutMs, read) {
+    if (typeof AbortController === "undefined") return fetch(url, options).then(read);
     var controller = new AbortController();
     var timer = setTimeout(function () {
       controller.abort();
     }, timeoutMs);
-    return fetch(url, Object.assign({}, options, { signal: controller.signal })).finally(function () {
-      clearTimeout(timer);
-    });
+    return fetch(url, Object.assign({}, options, { signal: controller.signal }))
+      .then(read)
+      .finally(function () {
+        clearTimeout(timer);
+      });
   }
 
   function getUserIdViaProfileHtml(username) {
-    var normalized = String(username || "").replace(/^@+/, "").trim().toLowerCase();
+    var normalized = String(username || "")
+      .replace(/^@+/, "")
+      .trim()
+      .toLowerCase();
     if (!normalized) return Promise.reject(new Error("No username provided"));
-    var profileUrl = new URL("/" + encodeURIComponent(normalized) + "/", "https://www.instagram.com").href;
-    return fetchWithTimeout(profileUrl, {
-      method: "GET",
-      credentials: "include",
-      headers: { Accept: "text/html" },
-    }, 10000)
-      .then(function (response) {
-        if (!response.ok) throw new Error("Profile HTML failed with HTTP " + response.status);
+    var profileUrl = new URL("/" + encodeURIComponent(normalized) + "/", location.origin).href;
+    return fetchWithTimeout(
+      profileUrl,
+      {
+        method: "GET",
+        credentials: "same-origin",
+        redirect: "manual",
+        headers: { Accept: "text/html" }
+      },
+      10000,
+      function (response) {
+        if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400))
+          throw accessError("Instagram redirected the profile request.");
+        checkResponse(response.status, response.url, profileUrl);
         return response.text().then(function (html) {
           var finalUrl = new URL(response.url || profileUrl);
           var finalUsername = finalUrl.pathname.split("/").filter(Boolean)[0] || "";
           if (!/(^|\.)instagram\.com$/i.test(finalUrl.hostname) || finalUsername.toLowerCase() !== normalized) {
             throw new Error("Profile HTML redirected away from the requested profile");
           }
-          var patterns = [/"profile_id"\s*:\s*"?(\d+)"?/, /"(?:logging_page_id|page_id)"\s*:\s*"profilePage_(\d+)"/, /"profilePage_(\d+)"/];
+          var patterns = [
+            /"profile_id"\s*:\s*"?(\d+)"?/,
+            /"(?:logging_page_id|page_id)"\s*:\s*"profilePage_(\d+)"/,
+            /"profilePage_(\d+)"/
+          ];
           var id = null;
           for (var i = 0; i < patterns.length; i++) {
             var m = html.match(patterns[i]);
@@ -1336,15 +1098,19 @@
               pk: id,
               username: normalized,
               profile_pic_url: (pic && pic.getAttribute("content")) || null,
-              _hdUrl: (pic && pic.getAttribute("content")) || null,
-            },
+              _hdUrl: (pic && pic.getAttribute("content")) || null
+            }
           };
         });
-      });
+      }
+    );
   }
 
   function getUserIdFromPolarisSearch(username) {
-    var normalized = String(username || "").replace(/^@+/, "").trim().toLowerCase();
+    var normalized = String(username || "")
+      .replace(/^@+/, "")
+      .trim()
+      .toLowerCase();
     if (!normalized) return Promise.reject(new Error("No username provided"));
     return graphQLRequest(
       "27706427925724183",
@@ -1354,15 +1120,17 @@
           include_reel: "true",
           query: normalized,
           rank_token: "",
-          search_surface: "web_top_search",
+          search_surface: "web_top_search"
         },
-        hasQuery: true,
+        hasQuery: true
       },
       "PolarisSearchBoxRefetchableQuery",
-      "comet.igweb.PolarisExploreRoute",
       "xdt_api__v1__fbsearch__topsearch_connection"
     ).then(function (obj) {
-      var users = obj && obj.data && obj.data.xdt_api__v1__fbsearch__topsearch_connection &&
+      var users =
+        obj &&
+        obj.data &&
+        obj.data.xdt_api__v1__fbsearch__topsearch_connection &&
         obj.data.xdt_api__v1__fbsearch__topsearch_connection.users;
       if (!Array.isArray(users) || !users.length) throw new Error("Polaris search returned no users");
       var result = users.find(function (item) {
@@ -1375,25 +1143,25 @@
         user: Object.assign({}, result.user, {
           id: String(rawId),
           pk: String(rawId),
-          username: result.user.username || normalized,
-        }),
+          username: result.user.username || normalized
+        })
       };
     });
   }
 
   function resolveUserIdLive(username) {
-    return getUserIdViaProfileHtml(username).catch(function () {
-      return getUserIdFromPolarisSearch(username);
-    });
+    return getUserIdViaProfileHtml(username).catch(fallbackUnlessDenied(() => getUserIdFromPolarisSearch(username)));
   }
 
   function getUserIdFromPersistentCache(username) {
-    var id = state.GL_userIdCache[String(username || "").toLowerCase()];
+    const key = String(username || "").toLowerCase();
+    const id = Object.hasOwn(state.GL_userIdCache, key) && state.GL_userIdCache[key];
+    if (!/^\d+$/.test(id)) return null;
     return id ? { user: { id: String(id), pk: String(id), username: username } } : null;
   }
 
   function putUserIdInCache(username, id) {
-    if (!username || id == null) return false;
+    if (!cleanName(username) || !/^\d{1,30}$/.test(String(id))) return false;
     var key = String(username).toLowerCase();
     var keys = Object.keys(state.GL_userIdCache);
     if (!state.GL_userIdCache[key] && keys.length >= USER_ID_MAX_CACHE_ITEMS) {
@@ -1406,7 +1174,10 @@
 
   function getUserId(username) {
     var key = String(username || "").toLowerCase();
-    if (!key) return Promise.reject(new Error("No username provided"));
+    if (!cleanName(key)) return Promise.reject(new Error("Invalid username"));
+    if (state.booted && !persistentCacheStore.backend) return initPersistentCache().then(() => getUserId(key));
+    if (userIdCache.size >= USER_ID_MAX_CACHE_ITEMS && !userIdCache.has(key))
+      userIdCache.delete(userIdCache.keys().next().value);
     if (userIdCache.has(key)) return userIdCache.get(key);
 
     var persisted = getUserIdFromPersistentCache(key);
@@ -1416,25 +1187,23 @@
     }
 
     var p = resolveUserIdLive(key)
-      .catch(function () {
-        return getUserIdWithAgent(key);
-      })
-      .catch(function () {
-        return getUserIdViaSearch(key);
-      })
+      .catch(fallbackUnlessDenied(() => getUserIdFromProfileInfo(key)))
+      .catch(fallbackUnlessDenied(() => getUserIdViaSearch(key)))
       .then(function (info) {
         var id = info && info.user && (info.user.pk || info.user.id);
         if (id) putUserIdInCache(key, id);
         return info;
       })
-      .catch(function () {
+      .catch(function (err) {
         userIdCache.delete(key);
+        if (err?.stopLookup) throw err;
         throw new Error("Cannot resolve user ID for: " + key);
       });
     userIdCache.set(key, p);
     return p;
   }
 
+  // ─── Reels (stories / highlights) ──────────────────────────────────────
   function normalizeReelPayload(obj, isHighlight) {
     if (!obj || !obj.data) return obj;
     var data = obj.data;
@@ -1462,38 +1231,42 @@
       "29170422829314651",
       {
         reel_ids_arr: [String(userId)],
-        __relay_internal__pv__PolarisCommunityNoteStoriesLabelEnabledrelayprovider: true,
+        __relay_internal__pv__PolarisCommunityNoteStoriesLabelEnabledrelayprovider: true
       },
       "PolarisStoriesV3ReelPageStandaloneQuery",
-      "comet.igweb.PolarisProfilePostsTabRoute",
       "xdt_api__v1__feed__reels_media"
-    )
-      .then(function (obj) {
-        normalizeReelPayload(obj, false);
-        var reel = obj && obj.data && obj.data.reels_media && obj.data.reels_media[0];
-        var owner = reel && (reel.owner || reel.user);
-        if (expectedUsername && owner && owner.username &&
-          owner.username.toLowerCase() !== expectedUsername.toLowerCase()) {
-          if (_retried) throw new Error("Story owner mismatch");
-          var key = expectedUsername.toLowerCase();
-          delete state.GL_userIdCache[key];
-          setPersistentCache(USER_ID_CACHE_KEY, state.GL_userIdCache);
-          userIdCache.delete(key);
-          return resolveUserIdLive(key).then(function (info) {
-            var fresh = info && info.user && (info.user.pk || info.user.id);
-            if (fresh && String(fresh) !== String(userId)) {
-              putUserIdInCache(key, fresh);
-              userIdCache.set(key, Promise.resolve(info));
-              return getStories(String(fresh), expectedUsername, true);
-            }
-            throw new Error("Story owner mismatch");
-          });
-        }
-        return obj;
-      });
+    ).then(function (obj) {
+      normalizeReelPayload(obj, false);
+      var reel = obj && obj.data && obj.data.reels_media && obj.data.reels_media[0];
+      var owner = reel && (reel.owner || reel.user);
+      if (
+        expectedUsername &&
+        owner &&
+        owner.username &&
+        owner.username.toLowerCase() !== expectedUsername.toLowerCase()
+      ) {
+        if (_retried) throw new Error("Story owner mismatch");
+        var key = expectedUsername.toLowerCase();
+        delete state.GL_userIdCache[key];
+        setPersistentCache(USER_ID_CACHE_KEY, state.GL_userIdCache);
+        userIdCache.delete(key);
+        return resolveUserIdLive(key).then(function (info) {
+          var fresh = info && info.user && (info.user.pk || info.user.id);
+          if (fresh && String(fresh) !== String(userId)) {
+            putUserIdInCache(key, fresh);
+            userIdCache.set(key, Promise.resolve(info));
+            return getStories(String(fresh), expectedUsername, true);
+          }
+          throw new Error("Story owner mismatch");
+        });
+      }
+      return obj;
+    });
   }
 
   function getHighlightStories(highlightId) {
+    highlightId = String(highlightId || "").replace(/^highlight:/, "");
+    if (!/^\d+$/.test(highlightId)) return Promise.reject(new Error("Invalid highlight link"));
     return graphQLRequest(
       "29299425373007309",
       {
@@ -1501,10 +1274,9 @@
         reel_ids: ["highlight:" + highlightId],
         first: 999,
         last: 0,
-        __relay_internal__pv__PolarisCommunityNoteStoriesLabelEnabledrelayprovider: true,
+        __relay_internal__pv__PolarisCommunityNoteStoriesLabelEnabledrelayprovider: true
       },
       "PolarisStoriesV3HighlightsPageQuery",
-      "comet.igweb.PolarisProfilePostsTabRoute",
       "xdt_api__v1__feed__reels_media__connection"
     ).then(function (obj) {
       return normalizeReelPayload(obj, true);
@@ -1512,26 +1284,14 @@
   }
 
   function getUserHighlights(userId) {
-    return request("https://www.instagram.com/api/v1/highlights/" + encodeURIComponent(userId) + "/highlights_tray/", {
+    return request(location.origin + "/api/v1/highlights/" + encodeURIComponent(userId) + "/highlights_tray/", {
       headers: { "X-IG-App-ID": getAppId() },
       retries: 0,
-      timeout: 12000,
+      timeout: 12000
     }).then(function (obj) {
       if (obj && obj.status === "ok" && Array.isArray(obj.tray)) return obj.tray;
       throw new Error("Highlights tray unavailable");
     });
-  }
-
-  function findDeepKey(obj, key, depth) {
-    if (!obj || typeof obj !== "object" || depth > 8) return null;
-    if (obj[key] !== undefined) return obj[key];
-    for (var k in obj) {
-      if (typeof obj[k] === "object") {
-        var r = findDeepKey(obj[k], key, depth + 1);
-        if (r) return r;
-      }
-    }
-    return null;
   }
 
   function shortcodeToMediaId(code) {
@@ -1543,38 +1303,47 @@
     return id.toString();
   }
 
-  function extractPostFromPageJson(postPath) {
-    var scripts = document.querySelectorAll('script[type="application/json"]');
-    for (var i = 0; i < scripts.length; i++) {
-      var text = scripts[i].textContent || "";
-      var item = null;
-      try {
-        var obj = JSON.parse(text);
-        if (text.indexOf("xdt_api__v1__media__shortcode__web_info") > -1) {
-          var info = findDeepKey(obj, "xdt_api__v1__media__shortcode__web_info", 0);
-          if (info && info.items && info.items[0] && info.items[0].code === postPath) {
-            item = info.items[0];
-          }
-        }
-        if (!item && text.indexOf("xig_polaris_media") > -1) {
-          var pol = findDeepKey(obj, "xig_polaris_media", 0);
-          if (pol) {
-            var gated = pol.if_not_gated_logged_out || pol.if_not_gated || pol.media;
-            if (gated && (gated.code === postPath || gated.pk)) item = gated;
-          }
-        }
-      } catch (e) {
+  function matchesPost(item, code) {
+    if (!item || !/^[A-Za-z0-9_-]{1,32}$/.test(code)) return false;
+    if (item.code || item.shortcode) return (item.code || item.shortcode) === code;
+    return String(item.pk || item.id || "").split("_")[0] === shortcodeToMediaId(code);
+  }
 
+  function extractPostFromPageJson(postPath) {
+    for (const script of document.querySelectorAll('script[type="application/json"]')) {
+      const text = script.textContent || "";
+      if (!/xdt_api__v1__media__shortcode__web_info|xig_polaris_media|shortcode_media/.test(text)) continue;
+      let root;
+      try {
+        root = JSON.parse(text);
+      } catch (_) {
+        continue;
       }
-      if (item) {
-        if (item.user && !item.owner) item.owner = item.user;
-        return { type: "query_id", resource: item };
+      const stack = [root];
+      while (stack.length) {
+        const node = stack.pop();
+        if (!node || typeof node !== "object") continue;
+        const pol = node.xig_polaris_media;
+        const available = [
+          ...(Array.isArray(node.xdt_api__v1__media__shortcode__web_info?.items)
+            ? node.xdt_api__v1__media__shortcode__web_info.items
+            : []),
+          pol?.if_not_gated_logged_out,
+          pol?.if_not_gated,
+          pol?.media,
+          node.shortcode_media,
+          node.xdt_shortcode_media
+        ];
+        const item = available.find((it) => matchesPost(it, postPath) && normalizePostResource(it).items.length);
+        if (item) return { type: "page", resource: item };
+        for (const value of Object.values(node)) if (value && typeof value === "object") stack.push(value);
       }
     }
     return null;
   }
 
-  function getPostPayload(shortcode) {
+  function getPostPayload(shortcode, pageChecked = false) {
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(shortcode || "")) return Promise.reject(new Error("Invalid post link"));
     var cached = state.GL_payloadCache[shortcode];
     if (cached && Date.now() - cached.ts < POST_CACHE_MAX_AGE) {
       return Promise.resolve(cached.value);
@@ -1587,102 +1356,59 @@
       state.GL_payloadCache[shortcode] = { ts: Date.now(), value: res };
       return res;
     }
-    var page = extractPostFromPageJson(shortcode);
+    var page = !pageChecked && extractPostFromPageJson(shortcode);
     if (page) return Promise.resolve(cache(page));
 
+    if (!USER_SETTING.FORCE_RESOURCE_VIA_MEDIA)
+      return Promise.reject(new Error("No downloadable media on this page"));
     return graphQLRequest(
       "39422285384081769",
       {
         shortcode: shortcode,
         __relay_internal__pv__PolarisShortDramaEnabledrelayprovider: true,
         __relay_internal__pv__PolarisThreadsStyleCommentsEnabledrelayprovider: false,
-        __relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider: true,
+        __relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider: true
       },
       "PolarisPostRootQuery",
-      "comet.igweb.PolarisFeedRoute",
       "xdt_api__v1__media__shortcode__web_info"
     )
       .then(function (obj) {
-        var items = obj && obj.data && obj.data.xdt_api__v1__media__shortcode__web_info &&
+        var items =
+          obj &&
+          obj.data &&
+          obj.data.xdt_api__v1__media__shortcode__web_info &&
           obj.data.xdt_api__v1__media__shortcode__web_info.items;
-        if (items && items[0]) {
+        if (Array.isArray(items) && matchesPost(items[0], shortcode)) {
           var item = items[0];
           if (item.user && !item.owner) item.owner = item.user;
           return cache({ type: "query_id", resource: item });
         }
         throw new Error("Post payload unavailable");
       })
-      .catch(function () {
-        var pk = shortcodeToMediaId(shortcode);
-        return request("https://www.instagram.com/api/v1/media/" + encodeURIComponent(pk) + "/info/", {
-          headers: { "X-IG-App-ID": getAppId() },
-          retries: 0,
-          timeout: 10000,
-        }).then(function (obj) {
-          if (obj && obj.status === "ok" && obj.items && obj.items[0]) {
-            var item = obj.items[0];
-            if (item.user && !item.owner) item.owner = item.user;
-            return cache({ type: "query_id", resource: item });
-          }
-          var vars = encodeURIComponent(JSON.stringify({ shortcode: shortcode }));
-          return request(
-            "https://www.instagram.com/graphql/query/?query_hash=2c4c2e343a8f64c625ba02b2aa12c7f8&variables=" + vars,
-            { headers: androidHeaders(), retries: 0, timeout: 10000 }
-          ).then(function (obj3) {
-            if (obj3 && obj3.data && obj3.data.shortcode_media) {
-              return cache({ type: "query_hash", resource: obj3.data.shortcode_media });
+      .catch(
+        fallbackUnlessDenied(function () {
+          var pk = shortcodeToMediaId(shortcode);
+          return request(location.origin + "/api/v1/media/" + encodeURIComponent(pk) + "/info/", {
+            headers: { "X-IG-App-ID": getAppId() },
+            retries: 0,
+            timeout: 10000
+          }).then(function (obj) {
+            if (obj && obj.status === "ok" && matchesPost(obj.items?.[0], shortcode)) {
+              var item = obj.items[0];
+              if (item.user && !item.owner) item.owner = item.user;
+              return cache({ type: "query_id", resource: item });
             }
             throw new Error("Post payload unavailable");
           });
-        });
-      });
+        })
+      );
   }
 
   function getMediaInfo(mediaId) {
-    return new Promise(function (resolve, reject) {
-      if (mediaId == null || String(mediaId) === "") {
-        reject(new Error("Invalid media id"));
-        return;
-      }
-      var appId = getAppId();
-      if (!appId) {
-        reject(new Error("Invalid app id"));
-        return;
-      }
-      var url = "https://i.instagram.com/api/v1/media/" + encodeURIComponent(String(mediaId)) + "/info/";
-      GM_xmlhttpRequest({
-        method: "GET",
-        url: url,
-        headers: { "User-Agent": navigator.userAgent, Accept: "*/*", "X-IG-App-ID": appId },
-        timeout: 8000,
-        onload: function (res) {
-          var obj = null;
-          try {
-            obj = JSON.parse(res.response);
-          } catch (e) {
-            reject(new Error("Media API returned invalid data"));
-            return;
-          }
-          var finalUrl = res.finalUrl || url;
-          if (finalUrl === url) {
-            resolve(obj);
-            return;
-          }
-          try {
-            var u = new URL(finalUrl);
-            if (u.pathname.indexOf("/accounts/login") === 0) reject(new Error("Login required for Media API"));
-            else reject(new Error("Media API redirected to " + u.host));
-          } catch (e) {
-            reject(new Error("Media API redirect"));
-          }
-        },
-        onerror: function () {
-          reject(new Error("Media API network error"));
-        },
-        ontimeout: function () {
-          reject(new Error("Media API timed out"));
-        },
-      });
+    if (!/^\d+(?:_\d+)?$/.test(String(mediaId))) return Promise.reject(new Error("Invalid media id"));
+    return request(location.origin + "/api/v1/media/" + encodeURIComponent(mediaId) + "/info/", {
+      headers: { "X-IG-App-ID": getAppId() },
+      timeout: 8000
     });
   }
 
@@ -1698,15 +1424,18 @@
         __relay_internal__pv__PolarisWebSchoolsEnabledrelayprovider: false,
         __relay_internal__pv__PolarisProfileRingsGradientEnabledrelayprovider: true,
         __relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider: true,
-        __relay_internal__pv__PolarisShortDramaEnabledrelayprovider: true,
+        __relay_internal__pv__PolarisShortDramaEnabledrelayprovider: true
       },
       "PolarisProfilePageContentQuery",
-      "comet.igweb.PolarisExploreRoute",
       null
     ).then(function (obj) {
       var user = obj && obj.data && obj.data.user;
-      if (expectedUsername && user && user.username &&
-        user.username.toLowerCase() !== expectedUsername.toLowerCase()) {
+      if (
+        expectedUsername &&
+        user &&
+        user.username &&
+        user.username.toLowerCase() !== expectedUsername.toLowerCase()
+      ) {
         throw new Error("Avatar owner mismatch");
       }
       var url = user && user.hd_profile_pic_url_info && user.hd_profile_pic_url_info.url;
@@ -1723,181 +1452,214 @@
     if (item.video_versions && item.video_versions.length) return true;
     if (item.video_resources && item.video_resources.length) return true;
     if (item.video_dash_manifest) return true;
-    if (item.media_type != null) return item.media_type !== 1;
+    if (item.video_url || item.__typename === "GraphVideo") return true;
+    if (item.media_type != null) return Number(item.media_type) === 2;
     return false;
   }
 
-  function gmFetch(url, responseType) {
-    return new Promise(function (resolve, reject) {
-      GM_xmlhttpRequest({
+  /* ============================================================
+     Ignis Forge — download engine
+     ============================================================ */
+
+  function gmFetch(raw, responseType) {
+    const url = trustedURL(raw);
+    if (!url) return Promise.reject(new Error("Unsupported media link"));
+    if (!manager.xhr) return Promise.reject(new Error("This userscript manager cannot fetch media"));
+    return new Promise((resolve, reject) => {
+      let handle;
+      const limit = 128 * 1024 * 1024;
+      const opts = {
         method: "GET",
-        url: url,
-        responseType: responseType,
+        url,
+        responseType,
+        anonymous: true,
+        redirect: "error",
         timeout: 60000,
-        onload: function (res) {
-          if (res.status < 200 || res.status >= 300) {
-            reject(new Error("HTTP " + res.status));
-            return;
+        onprogress(ev) {
+          if (responseType === "arraybuffer" && Math.max(ev.total || 0, ev.loaded || 0) > limit) {
+            reject(new Error("DASH track is too large for in-memory merging"));
+            handle?.abort?.();
           }
-          var hdrs = String(res.responseHeaders || "").toLowerCase();
-          if (/text\/html|application\/json/i.test(hdrs)) {
-            reject(new Error("Server returned a web page instead of media"));
-            return;
-          }
+        },
+        onload(res) {
+          if (res.status < 200 || res.status >= 300)
+            return reject(
+              Object.assign(new Error("Media returned HTTP " + res.status), {
+                canTryAlternate: res.status === 404 || res.status === 410
+              })
+            );
+          if (!trustedURL(res.finalUrl || url)) return reject(new Error("Unsupported media redirect"));
+          const type =
+            /^content-type:\s*([^;\r\n]+)/im.exec(res.responseHeaders || "")?.[1] || res.response?.type || "";
+          if (
+            type &&
+            !/^(image\/(?:jpe?g|webp|avif|png|gif)|(?:video|audio)\/[\w.+-]+|application\/(?:octet-stream|mp4|binary))$/i.test(
+              type.trim()
+            )
+          )
+            return reject(new Error("Server did not return media"));
+          if (!(res.response?.size > 0 || res.response?.byteLength > 0))
+            return reject(new Error("Empty media response"));
+          if (responseType === "arraybuffer" && res.response.byteLength > limit)
+            return reject(new Error("DASH track is too large for in-memory merging"));
           resolve(res.response);
         },
-        onerror: function () {
-          reject(new Error("Network error"));
-        },
-        ontimeout: function () {
-          reject(new Error("Download timed out"));
-        },
-      });
+        onerror: () => reject(Object.assign(new Error("Media request failed"), { canTryAlternate: true })),
+        ontimeout: () => reject(Object.assign(new Error("Media request timed out"), { canTryAlternate: true })),
+        onabort: () => reject(new Error("Media request cancelled"))
+      };
+      handle = manager.xhr(opts);
+      // Promise-only managers need not call the legacy callbacks.
+      if (handle?.then)
+        handle.then((r) => {
+          if (r) opts.onload(r);
+        }, reject);
     });
   }
-
-  function fetchMediaBlob(url) {
-    return gmFetch(url, "blob").then(function (blob) {
-      return { blob: blob, isWeb: false };
-    });
-  }
-
   function fetchArrayBuffer(url) {
-    updateLoadingBar(true);
-    return gmFetch(url, "arraybuffer").finally(function () {
-      updateLoadingBar(false);
+    return gmFetch(url, "arraybuffer");
+  }
+
+  function managerDownload(url, name) {
+    return new Promise((resolve, reject) => {
+      let handle,
+        done = false;
+      const finish = (err) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        err ? reject(err) : resolve();
+      };
+      const timer = setTimeout(() => {
+        finish(new Error("Download manager timed out"));
+        try {
+          handle?.abort?.();
+        } catch (_) {}
+      }, 120000);
+      try {
+        handle = manager.download({
+          url,
+          name,
+          timeout: 120000,
+          onload: () => finish(),
+          onerror: () => finish(new Error("Download manager rejected the file")),
+          onabort: () => finish(new Error("Download cancelled")),
+          ontimeout: () => finish(new Error("Download manager timed out"))
+        });
+        if (handle?.then)
+          handle.then(
+            () => finish(),
+            (e) => finish(e || new Error("Download failed"))
+          );
+      } catch (e) {
+        finish(e);
+      }
     });
   }
 
-  function saveFiles(downloadLink, metadata) {
-    return new Promise(function (resolve) {
-      updateLoadingBar(true);
-      var uidPromise =
-        metadata.uid == null && metadata.username && metadata.username !== "NONE"
-          ? getUserId(metadata.username)
-              .then(function (info) {
-                return (info && info.user && (info.user.id || info.user.pk)) || null;
-              })
-              .catch(function () {
-                return null;
-              })
-          : Promise.resolve(metadata.uid != null ? metadata.uid : null);
-      var filetype = metadata.filetype || "jpg";
-      var wantExif =
+  function needsUID(meta) {
+    return (
+      meta.uid == null &&
+      USER_SETTING.AUTO_RENAME &&
+      /%UID%/i.test(state.fileRenameFormat) &&
+      cleanName(meta.username) &&
+      meta.username !== "NONE"
+    );
+  }
+  async function resolveFilenameUID(meta) {
+    if (!needsUID(meta)) return meta;
+    try {
+      const info = await getUserId(meta.username);
+      return { ...meta, uid: info.user?.id || info.user?.pk };
+    } catch (_) {
+      return meta;
+    } // An optional filename token must not block an offered file.
+  }
+  async function saveFiles(raw, metadata, alternate) {
+    updateLoadingBar(true);
+    try {
+      let url = trustedURL(raw);
+      if (!url) throw new Error("Unsupported media link");
+      const meta = { ...(await resolveFilenameUID(metadata)) };
+      const ext = mediaExtension(url, meta.filetype || "jpg");
+      meta.filetype = ext;
+      const exif =
         USER_SETTING.MODIFY_RESOURCE_EXIF &&
-        filetype === "jpg" &&
-        metadata.shortcode &&
-        metadata.sourceType === "photo";
-      var wantCaption = USER_SETTING.DOWNLOAD_WITH_CAPTION && metadata.caption;
+        meta.sourceType === "photo" &&
+        meta.shortcode &&
+        /^(jpg|webp)$/.test(ext);
       if (
         USER_SETTING.USE_EXTERNAL_DOWNLOAD_MODE &&
-        !wantExif &&
-        !wantCaption &&
-        typeof GM_download === "function"
+        manager.download &&
+        !exif &&
+        !(USER_SETTING.DOWNLOAD_WITH_CAPTION && meta.caption)
       ) {
+        await managerDownload(url, getSaveFileName(url, meta));
+        Stats.record(meta.sourceType, 0);
+      } else {
+        let blob;
         try {
-          GM_download({
-            url: downloadLink,
-            name: getSaveFileName(downloadLink, metadata),
-            onload: function () {
-              Stats.record(metadata.sourceType, 0);
-              updateLoadingBar(false);
-              resolve(true);
-            },
-            onerror: function () {
-              updateLoadingBar(false);
-              resolve(false);
-            },
-          });
+          blob = await gmFetch(url, "blob");
         } catch (e) {
-          updateLoadingBar(false);
-          resolve(false);
+          // Retry only an asset retrieval, never a cancelled or rejected handoff.
+          if (!e.canTryAlternate || !trustedURL(alternate) || alternate === url) throw e;
+          url = alternate;
+          blob = await gmFetch(url, "blob");
         }
-        return;
+        await createSaveFileElement(url, blob, meta);
       }
-      fetchMediaBlob(downloadLink)
-        .then(function (r) {
-          if (r.isWeb) throw new Error("Server returned a web page instead of media");
-          return uidPromise.then(function (uid) {
-            metadata.uid = uid;
-            return r.blob;
-          });
-        })
-        .then(function (blob) {
-          return createSaveFileElement(downloadLink, blob, metadata);
-        })
-        .then(function () {
-          updateLoadingBar(false);
-          resolve(true);
-        })
-        .catch(function (err) {
-          updateLoadingBar(false);
-          logger("saveFiles failed:", err && err.message ? err.message : err);
-          Toasts.error("Download failed: " + ((err && err.message) || "unknown error"));
-          resolve(false);
-        });
-    });
+      return true;
+    } catch (err) {
+      logger("Save failed", err.message);
+      Toasts.error("Download failed: " + err.message);
+      return false;
+    } finally {
+      updateLoadingBar(false);
+    }
   }
 
-  function triggerDownload(blob, filename) {
-    return new Promise(function (resolve) {
-      var url = URL.createObjectURL(blob);
-      if (USER_SETTING.USE_EXTERNAL_DOWNLOAD_MODE && typeof GM_download === "function") {
-        GM_download({
-          url: url,
-          name: filename,
-          onload: function () {
-            URL.revokeObjectURL(url);
-            resolve();
-          },
-          onerror: function () {
-            URL.revokeObjectURL(url);
-            resolve();
-          },
-        });
-        return;
+  async function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    if (USER_SETTING.USE_EXTERNAL_DOWNLOAD_MODE && manager.download) {
+      try {
+        await managerDownload(url, filename);
+      } finally {
+        URL.revokeObjectURL(url);
       }
-      var link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      link.rel = "noopener";
-      link.style.display = "none";
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.rel = "noopener";
+    link.hidden = true;
+    try {
       document.body.appendChild(link);
       link.click();
-      setTimeout(function () {
-        try {
-          document.body.removeChild(link);
-        } catch (e) {
-
-        }
-        URL.revokeObjectURL(url);
-        resolve();
-      }, 300);
-    });
-  }
-
-  function replaceSameOriginHost(url) {
-    try {
-      var urlObj = new URL(url);
-      urlObj.host = "scontent.cdninstagram.com";
-      return urlObj.href;
-    } catch (e) {
-      return url;
+    } finally {
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
     }
   }
 
   function getSaveFileName(downloadLink, metadata) {
-    var timestamp = normTs(metadata.timestamp);
-    var index = metadata.index != null ? metadata.index : 0;
+    var timestamp = normTs(USER_SETTING.RENAME_PUBLISH_DATE ? metadata.timestamp : Date.now());
+    var index = metadata.index != null ? metadata.index : 1;
     var date = new Date(timestamp * 1000);
     var filetype = metadata.filetype || "jpg";
 
-    if (USER_SETTING.MATCH_VIDEO_FILENAME_TO_THUMBNAIL && (filetype === "mp4" || filetype === "m4a") && metadata.thumbnailURL) {
+    // Optional: name a video after its thumbnail file, matching the two
+    // files when they sit side by side in a download folder.
+    if (
+      USER_SETTING.MATCH_VIDEO_FILENAME_TO_THUMBNAIL &&
+      (filetype === "mp4" || filetype === "m4a") &&
+      metadata.thumbnailURL
+    ) {
       try {
         var thumbBase = new URL(metadata.thumbnailURL).pathname.split("/").pop().split(".").slice(0, -1).join(".");
         if (thumbBase) return sanitizeFilename((metadata.username || "instagram") + "_" + thumbBase) + "." + filetype;
       } catch (e) {
-
+        /* fall through to the template */
       }
     }
 
@@ -1907,7 +1669,7 @@
         String(new URL(downloadLink).pathname.split("/").filter(Boolean).pop() || "")
       );
     } catch (e) {
-
+      /* ignore */
     }
     var base = original_name.split(".").slice(0, -1).join(".");
     original_name = base || original_name;
@@ -1925,7 +1687,7 @@
       ORIGINAL_NAME: original_name,
       ORIGINAL_NAME_FIRST: original_name.split("_")[0] || original_name,
       INDEX: String(index),
-      UID: metadata.uid != null ? String(metadata.uid) : "",
+      UID: metadata.uid != null ? String(metadata.uid) : ""
     };
     var filename = (state.fileRenameFormat || "").replace(/%([\w\-]+)%/g, function (m, t) {
       var up = t.toUpperCase();
@@ -1941,55 +1703,55 @@
   }
 
   async function createSaveFileElement(downloadLink, object, metadata) {
-    var filetype = metadata.filetype || "jpg";
-    if (metadata.uid == null && metadata.username && metadata.username !== "NONE") {
+    const mimeExt = {
+      "image/jpeg": "jpg",
+      "image/webp": "webp",
+      "image/png": "png",
+      "image/gif": "gif",
+      "image/avif": "avif",
+      "video/mp4": "mp4",
+      "video/webm": "webm"
+    };
+    metadata = {
+      ...metadata,
+      filetype: mimeExt[object.type?.split(";")[0].toLowerCase()] || metadata.filetype || "jpg"
+    };
+    const name = getSaveFileName(downloadLink, metadata);
+    let blob = object;
+    if (
+      USER_SETTING.MODIFY_RESOURCE_EXIF &&
+      /^(jpg|webp)$/.test(metadata.filetype) &&
+      metadata.shortcode &&
+      metadata.sourceType === "photo"
+    ) {
       try {
-        var userInfo = await getUserId(metadata.username);
-        metadata.uid =
-          (userInfo && userInfo.user && (userInfo.user.id || userInfo.user.pk)) || null;
-      } catch (e) {
-        metadata.uid = null;
+        blob = await changeExifData(object, metadata);
+      } catch (_) {
+        logger("Unsupported image metadata layout; keeping original bytes");
       }
     }
-    var downloadName = getSaveFileName(downloadLink, metadata);
-    if (!metadata.skipMedia) {
-      var wantExif =
-        USER_SETTING.MODIFY_RESOURCE_EXIF &&
-        filetype === "jpg" &&
-        metadata.shortcode &&
-        metadata.sourceType === "photo" &&
-        (object.type === "image/jpeg" || object.type === "image/webp");
-      if (wantExif) {
-        try {
-          var newBlob = await changeExifData(object, metadata);
-          await triggerDownload(newBlob, downloadName);
-        } catch (err) {
-          logger("EXIF attach failed, saving original:", err && err.message ? err.message : err);
-          await triggerDownload(object, downloadName);
-        }
-      } else {
-        await triggerDownload(object, downloadName);
-      }
-      Stats.record(String(metadata.sourceType || "other"), (object && object.size) || 0);
-    }
+    await triggerDownload(blob, name);
+    Stats.record(metadata.sourceType, blob.size);
     if (USER_SETTING.DOWNLOAD_WITH_CAPTION && metadata.caption) {
-      var captionName = getSaveFileName(
-        downloadLink,
-        Object.assign({}, metadata, { filetype: "txt" })
-      );
-      await triggerDownload(
-        new Blob([metadata.caption], { type: "text/plain;charset=utf-8" }),
-        captionName
-      );
-      Stats.record("caption", 0);
+      const caption = new Blob([metadata.caption], { type: "text/plain;charset=utf-8" });
+      try {
+        await triggerDownload(caption, name.replace(/\.[^.]+$/, ".txt"));
+        Stats.record("caption", caption.size);
+      } catch (_) {
+        Toasts.error("Media saved, but the caption could not be saved.");
+      }
     }
   }
 
-  function concatBytes(a, b) {
-    var c = new Uint8Array(a.length + b.length);
-    c.set(a, 0);
-    c.set(b, a.length);
-    return c;
+  // ─── EXIF writer (JPEG APP1 + WebP EXIF chunk) ─────────────────────────
+  function concatBytes(...pieces) {
+    const bytes = new Uint8Array(pieces.reduce((n, p) => n + p.length, 0));
+    let offset = 0;
+    for (const piece of pieces) {
+      bytes.set(piece, offset);
+      offset += piece.length;
+    }
+    return bytes;
   }
   function u32le(v) {
     return new Uint8Array([v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255]);
@@ -2041,42 +1803,49 @@
   }
 
   function buildExifPayload(metadata) {
-    var dateBytes = enc(formatExifDate(metadata.timestamp) + "\0");
-    var artistBytes = enc((metadata.username || "") + "\0");
-    var exifIndex = metadata.index != null && metadata.index > 0 ? metadata.index : 1;
-    var keywordBytes = encUtf16le(
-      "https://www.instagram.com/p/" + (metadata.shortcode || "") + "/?img_index=" + exifIndex + "\0"
-    );
-    var xpCommentBytes = encUtf16le(
-      "https://www.instagram.com/uid/" + (metadata.uid || "unknown") + "\0"
-    );
-    var tiffHeader = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00]);
-    var ifd0 = concatBytes(
+    const index = Math.max(1, Number(metadata.index) || 1);
+    const user = cleanName(metadata.username),
+      artist = enc((user || "") + "\0");
+    const url = encUtf16le(`https://www.instagram.com/p/${metadata.shortcode}/?img_index=${index}\0`);
+    const profile = encUtf16le((user ? `https://www.instagram.com/${user}/` : "Instagram") + "\0");
+    const date = enc(formatExifDate(metadata.timestamp) + "\0");
+    const header = new Uint8Array([0x49, 0x49, 0x2a, 0, 8, 0, 0, 0]);
+    const dirLength = (entries) => 2 + 12 * entries + 4;
+    const exifDir = header.length + dirLength(4),
+      dataStart = exifDir + dirLength(1),
+      blocks = [];
+    let next = dataStart;
+    function entry(tag, type, value) {
+      if (value.length <= 4)
+        return makeIFDEntry(
+          tag,
+          type,
+          value.length,
+          value.reduce((v, b, i) => v + b * 256 ** i, 0)
+        );
+      const pos = next;
+      blocks.push(value);
+      next += value.length;
+      if (next % 2) {
+        blocks.push(new Uint8Array(1));
+        next++;
+      }
+      return makeIFDEntry(tag, type, value.length, pos);
+    }
+    return concatBytes(
+      enc("Exif\0\0"),
+      header,
       u16le(4),
-      concatBytes(
-        concatBytes(
-          concatBytes(
-            makeIFDEntry(0x013b, 2, artistBytes.length, 80),
-            makeIFDEntry(0x8769, 4, 1, 62)
-          ),
-          concatBytes(
-            makeIFDEntry(0x9c9c, 1, xpCommentBytes.length, 80 + artistBytes.length + keywordBytes.length),
-            makeIFDEntry(0x9c9e, 1, keywordBytes.length, 80 + artistBytes.length)
-          )
-        ),
-        u32le(0)
-      )
-    );
-    var exifIfd = concatBytes(
+      entry(0x013b, 2, artist),
+      makeIFDEntry(0x8769, 4, 1, exifDir),
+      entry(0x9c9c, 1, profile),
+      entry(0x9c9e, 1, url),
+      u32le(0),
       u16le(1),
-      concatBytes(
-        makeIFDEntry(0x9003, 2, dateBytes.length, 80 + artistBytes.length + keywordBytes.length + xpCommentBytes.length),
-        u32le(0)
-      )
+      entry(0x9003, 2, date),
+      u32le(0),
+      ...blocks
     );
-    var body = concatBytes(tiffHeader, concatBytes(ifd0, exifIfd));
-    var payload = concatBytes(enc("Exif\0\0"), body);
-    return concatBytes(payload, concatBytes(concatBytes(concatBytes(artistBytes, keywordBytes), xpCommentBytes), dateBytes));
   }
 
   function changeExifData(blob, metadata) {
@@ -2085,11 +1854,18 @@
       if (buf.length < 12) throw new Error("Not a JPEG or WEBP");
       var isJpeg = buf[0] === 0xff && buf[1] === 0xd8;
       var isWebp =
-        buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
-        buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50;
+        buf[0] === 0x52 &&
+        buf[1] === 0x49 &&
+        buf[2] === 0x46 &&
+        buf[3] === 0x46 &&
+        buf[8] === 0x57 &&
+        buf[9] === 0x45 &&
+        buf[10] === 0x42 &&
+        buf[11] === 0x50;
       if (!isJpeg && !isWebp) throw new Error("Not a JPEG or WEBP");
 
       var data = buildExifPayload(metadata);
+      if (data.length + 2 > 65535) throw new Error("Metadata too large");
 
       if (isJpeg) {
         function app1() {
@@ -2143,10 +1919,8 @@
             ok = false;
             break;
           }
-          if (m === 0xe1) {
-            i += 2 + len;
-            continue;
-          }
+          // Never discard orientation, camera tags or unrelated APP1/XMP data.
+          if (m === 0xe1 && len >= 8 && [69, 120, 105, 102, 0, 0].every((v, k) => buf[i + 4 + k] === v)) return blob;
           out.push(buf.subarray(i, i + 2 + len));
           i += 2 + len;
         }
@@ -2164,53 +1938,76 @@
         return new Blob([jpeg], { type: "image/jpeg" });
       }
 
-      var chunks = [];
-      var c = 12;
-      var vp8xIndex = -1;
-      while (c + 8 <= buf.length) {
-        var tag = String.fromCharCode(buf[c], buf[c + 1], buf[c + 2], buf[c + 3]);
-        var size = buf[c + 4] | (buf[c + 5] << 8) | (buf[c + 6] << 16) | (buf[c + 7] << 24);
-        var end = c + 8 + size;
-        if (end > buf.length) break;
-        if (tag === "VP8X") vp8xIndex = chunks.length;
-        if (tag !== "EXIF" && tag !== "XMP ") chunks.push(buf.subarray(c, end));
-        c = end;
+      const dv = new DataView(buffer),
+        chunks = [];
+      if (dv.getUint32(4, true) !== buf.length - 8) throw new Error("Invalid WebP length");
+      let pos = 12,
+        extended = null,
+        simple = null,
+        xmp = -1;
+      while (pos < buf.length) {
+        if (pos + 8 > buf.length) throw new Error("Incomplete WebP chunk");
+        const tag = String.fromCharCode(...buf.subarray(pos, pos + 4)),
+          size = dv.getUint32(pos + 4, true);
+        const end = pos + 8 + size + (size % 2);
+        if (end > buf.length) throw new Error("Incomplete WebP data");
+        if (tag === "EXIF") return blob;
+        const chunk = buf.slice(pos, end);
+        if (tag === "VP8X") {
+          if (size !== 10) throw new Error("Invalid extended header");
+          extended = chunk;
+        }
+        if (tag === "VP8 " || tag === "VP8L") simple = { tag, chunk, size };
+        if (tag === "XMP ") xmp = chunks.length;
+        chunks.push(chunk);
+        pos = end;
       }
-      var padded = data.length % 2 === 1 ? concatBytes(data, new Uint8Array([0])) : data;
-      var hdr = new Uint8Array(8);
-      hdr.set(fourCC("EXIF"), 0);
-      new DataView(hdr.buffer).setUint32(4, padded.length, true);
-      var exifChunk = concatBytes(hdr, padded);
-      if (vp8xIndex > -1) {
-        var vp8x = chunks[vp8xIndex].slice();
-        vp8x[8] |= 0x10;
-        chunks[vp8xIndex] = vp8x;
-        chunks.splice(vp8xIndex + 1, 0, exifChunk);
-      } else {
-        chunks.push(exifChunk);
+      // WebP EXIF is TIFF data. Chunk lengths exclude the even-byte padding.
+      const tiff = data.subarray(6),
+        exif = new Uint8Array(8 + tiff.length + (tiff.length % 2));
+      exif.set(fourCC("EXIF"));
+      exif.set(u32le(tiff.length), 4);
+      exif.set(tiff, 8);
+      chunks.splice(xmp < 0 ? chunks.length : xmp, 0, exif);
+      if (!extended) {
+        if (!simple) throw new Error("Missing WebP image");
+        const { tag, chunk, size } = simple;
+        let width,
+          height,
+          alpha = 0;
+        if (tag === "VP8L" && size >= 5 && chunk[8] === 0x2f) {
+          const bits = new DataView(chunk.buffer).getUint32(9, true);
+          width = 1 + (bits & 0x3fff);
+          height = 1 + ((bits >>> 14) & 0x3fff);
+          alpha = (bits >>> 28) & 1;
+        } else if (tag === "VP8 " && size >= 10 && chunk[11] === 0x9d && chunk[12] === 1 && chunk[13] === 0x2a) {
+          width = (chunk[14] | (chunk[15] << 8)) & 0x3fff;
+          height = (chunk[16] | (chunk[17] << 8)) & 0x3fff;
+        } else throw new Error("Unsupported WebP header");
+        if (!width || !height) throw new Error("Invalid WebP dimensions");
+        extended = new Uint8Array(18);
+        extended.set(fourCC("VP8X"));
+        extended.set(u32le(10), 4);
+        extended[8] = alpha ? 0x10 : 0;
+        extended.set(u32le(width - 1).subarray(0, 3), 12);
+        extended.set(u32le(height - 1).subarray(0, 3), 15);
+        chunks.unshift(extended);
       }
-      var wTotal = 12;
-      chunks.forEach(function (ch) {
-        wTotal += ch.length;
-      });
-      var webp = new Uint8Array(wTotal);
-      webp.set(new Uint8Array([0x52, 0x49, 0x46, 0x46]), 0);
-      webp.set(u32le(wTotal - 8), 4);
-      webp.set(new Uint8Array([0x57, 0x45, 0x42, 0x50]), 8);
-      var wOff = 12;
-      chunks.forEach(function (ch) {
-        webp.set(ch, wOff);
-        wOff += ch.length;
-      });
-      return new Blob([webp], { type: "image/webp" });
+      extended[8] |= 0x08;
+      return new Blob(
+        [fourCC("RIFF"), u32le(4 + chunks.reduce((n, c) => n + c.length, 0)), fourCC("WEBP"), ...chunks],
+        { type: "image/webp" }
+      );
     });
   }
 
+  // ─── DASH pipeline ─────────────────────────────────────────────────────
   function parseDashManifest(mpdXml) {
     try {
       if (!mpdXml || typeof mpdXml !== "string") return { video: null, audio: null };
       var xml = new DOMParser().parseFromString(mpdXml, "application/xml");
-      if (xml.querySelector("parsererror")) return { video: null, audio: null };
+      if (xml.querySelector("parsererror, ContentProtection") || xml.querySelectorAll("Period").length !== 1)
+        return { video: null, audio: null };
       var reps = Array.prototype.slice.call(xml.querySelectorAll("Representation"));
       var cands = [];
       reps.forEach(function (rep) {
@@ -2219,19 +2016,15 @@
         var contentType = (set && set.getAttribute("contentType")) || "";
         var baseUrlEl = rep.querySelector("BaseURL");
         var url = baseUrlEl ? baseUrlEl.textContent : null;
-        if (!url) {
-          var st = rep.querySelector("SegmentTemplate");
-          if (st && st.getAttribute("media")) {
-            url = st
-              .getAttribute("media")
-              .replace(/\$RepresentationID\$/g, rep.getAttribute("id") || "")
-              .replace(/\$Number\$/g, st.getAttribute("startNumber") || "0")
-              .replace(/\$Bandwidth\$/g, rep.getAttribute("bandwidth") || "");
-          }
-        }
-        if (!url) return;
+        // One media segment is not a complete track. Leave segmented or protected manifests alone.
+        if (
+          !trustedURL(url) ||
+          rep.querySelector("SegmentTemplate, SegmentList") ||
+          set?.querySelector(":scope > SegmentTemplate, :scope > SegmentList") ||
+          rep.closest("Period")?.querySelector(":scope > SegmentTemplate, :scope > SegmentList")
+        )
+          return;
         url = url.trim();
-        if (!/^https?:\/\//i.test(url)) return;
         cands.push({
           id: rep.getAttribute("id") || "",
           url: url,
@@ -2240,7 +2033,7 @@
           codecs: rep.getAttribute("codecs") || (set && set.getAttribute("codecs")) || "",
           bandwidth: parseInt(rep.getAttribute("bandwidth") || "0", 10) || 0,
           width: parseInt(rep.getAttribute("width") || "0", 10) || 0,
-          height: parseInt(rep.getAttribute("height") || "0", 10) || 0,
+          height: parseInt(rep.getAttribute("height") || "0", 10) || 0
         });
       });
       var isVideo = function (c) {
@@ -2250,17 +2043,13 @@
         return (c.contentType || "").indexOf("audio") > -1 || (c.mimeType || "").indexOf("audio") === 0;
       };
       var video =
-        cands
-          .filter(isVideo)
-          .sort(function (a, b) {
-            return b.height - a.height || b.bandwidth - a.bandwidth || b.width - a.width;
-          })[0] || null;
+        cands.filter(isVideo).sort(function (a, b) {
+          return b.height - a.height || b.bandwidth - a.bandwidth || b.width - a.width;
+        })[0] || null;
       var audio =
-        cands
-          .filter(isAudio)
-          .sort(function (a, b) {
-            return b.bandwidth - a.bandwidth;
-          })[0] || null;
+        cands.filter(isAudio).sort(function (a, b) {
+          return b.bandwidth - a.bandwidth;
+        })[0] || null;
       return { video: video, audio: audio };
     } catch (e) {
       logger("[DASH]", "parse error:", e && e.message ? e.message : e);
@@ -2273,123 +2062,109 @@
     return (async function () {
       var videoInput = new MB.Input({ formats: [MB.MP4], source: new MB.BufferSource(videoBuf) });
       var audioInput = new MB.Input({ formats: [MB.MP4], source: new MB.BufferSource(audioBuf) });
-      var vTrack = await videoInput.getPrimaryVideoTrack();
-      if (!vTrack || !vTrack.codec) throw new Error("No video track found");
-      var aTrack = await audioInput.getPrimaryAudioTrack();
-      if (!aTrack || !aTrack.codec) throw new Error("No audio track found");
-      var vSink = new MB.EncodedPacketSink(vTrack);
-      var aSink = new MB.EncodedPacketSink(aTrack);
-      var output = new MB.Output({
-        format: new MB.Mp4OutputFormat({ fastStart: "in-memory" }),
-        target: new MB.BufferTarget(),
-      });
-      var vSource = new MB.EncodedVideoPacketSource(vTrack.codec);
-      var aSource = new MB.EncodedAudioPacketSource(aTrack.codec);
-      output.addVideoTrack(vSource, { rotation: vTrack.rotation || 0 });
-      output.addAudioTrack(aSource);
-      await output.start();
-      var vDecoderConfig = await vTrack.getDecoderConfig();
-      var aDecoderConfig = await aTrack.getDecoderConfig();
-      var vMeta = vDecoderConfig ? { decoderConfig: vDecoderConfig } : undefined;
-      var aMeta = aDecoderConfig ? { decoderConfig: aDecoderConfig } : undefined;
-      var vIter = vSink.packets();
-      var aIter = aSink.packets();
-      var vNext = await vIter.next();
-      var aNext = await aIter.next();
-      var vSentMeta = false;
-      var aSentMeta = false;
-      var minTs = Infinity;
-      if (!vNext.done) minTs = Math.min(minTs, vNext.value.timestamp);
-      if (!aNext.done) minTs = Math.min(minTs, aNext.value.timestamp);
-      var tsShift = isFinite(minTs) && minTs < 0 ? -minTs : 0;
-      function adjust(p) {
-        if (!tsShift || typeof p.clone !== "function") return p;
-        return p.clone({ timestamp: p.timestamp + tsShift });
-      }
-      while (!vNext.done || !aNext.done) {
-        var takeVideo = vNext.done ? false : aNext.done ? true : vNext.value.timestamp <= aNext.value.timestamp;
-        if (takeVideo) {
-          await vSource.add(adjust(vNext.value), vSentMeta ? undefined : vMeta);
-          vSentMeta = true;
-          vNext = await vIter.next();
-        } else {
-          await aSource.add(adjust(aNext.value), aSentMeta ? undefined : aMeta);
-          aSentMeta = true;
-          aNext = await aIter.next();
+      let output;
+      try {
+        var vTrack = await videoInput.getPrimaryVideoTrack();
+        if (!vTrack || !vTrack.codec) throw new Error("No video track found");
+        var aTrack = await audioInput.getPrimaryAudioTrack();
+        if (!aTrack || !aTrack.codec) throw new Error("No audio track found");
+        var vSink = new MB.EncodedPacketSink(vTrack);
+        var aSink = new MB.EncodedPacketSink(aTrack);
+        output = new MB.Output({
+          format: new MB.Mp4OutputFormat({ fastStart: "in-memory" }),
+          target: new MB.BufferTarget()
+        });
+        var vSource = new MB.EncodedVideoPacketSource(vTrack.codec);
+        var aSource = new MB.EncodedAudioPacketSource(aTrack.codec);
+        output.addVideoTrack(vSource, { rotation: vTrack.rotation || 0 });
+        output.addAudioTrack(aSource);
+        await output.start();
+        var vDecoderConfig = await vTrack.getDecoderConfig();
+        var aDecoderConfig = await aTrack.getDecoderConfig();
+        var vMeta = vDecoderConfig ? { decoderConfig: vDecoderConfig } : undefined;
+        var aMeta = aDecoderConfig ? { decoderConfig: aDecoderConfig } : undefined;
+        var vIter = vSink.packets();
+        var aIter = aSink.packets();
+        var vNext = await vIter.next();
+        var aNext = await aIter.next();
+        if (vNext.done || aNext.done) throw new Error("Empty DASH track");
+        const shift = Math.max(0, -Math.min(vNext.value.timestamp, aNext.value.timestamp));
+        async function writeTrack(source, iterator, first, metadata) {
+          let next = first;
+          while (!next.done) {
+            const packet = next.value;
+            await source.add(shift ? packet.clone({ timestamp: packet.timestamp + shift }) : packet, metadata);
+            metadata = undefined;
+            next = await iterator.next();
+          }
+          source.close();
         }
+        // Independent pumps respect backpressure even when the streams end at
+        // different times. Awaiting one stalled track before writing the other can deadlock.
+        await Promise.all([writeTrack(vSource, vIter, vNext, vMeta), writeTrack(aSource, aIter, aNext, aMeta)]);
+        await output.finalize();
+        var outBuf = output.target.buffer;
+        if (outBuf instanceof ArrayBuffer) return outBuf;
+        if (outBuf && outBuf.buffer) {
+          return outBuf.buffer.slice(outBuf.byteOffset, outBuf.byteOffset + outBuf.byteLength);
+        }
+        throw new Error("Unexpected output buffer type");
+      } catch (e) {
+        if (output?.state === "started") await output.cancel().catch(() => {});
+        throw e;
+      } finally {
+        videoInput.dispose?.();
+        audioInput.dispose?.();
       }
-      await output.finalize();
-      var outBuf = output.target.buffer;
-      if (outBuf instanceof ArrayBuffer) return outBuf;
-      if (outBuf && outBuf.buffer) {
-        return outBuf.buffer.slice(outBuf.byteOffset, outBuf.byteOffset + outBuf.byteLength);
-      }
-      throw new Error("Unexpected output buffer type");
     })();
   }
 
-  async function downloadDashStreams(videoUrl, audioUrl, meta) {
-    var buffers = await Promise.all([fetchArrayBuffer(videoUrl), fetchArrayBuffer(audioUrl)]);
-    var mergedBuf = await muxDashVideoAudioToMp4(buffers[0], buffers[1]);
-    var merged = new Blob([mergedBuf], { type: "video/mp4" });
-    await createSaveFileElement(videoUrl, merged, meta);
-  }
-
   async function tryDashDownload(mediaItem, meta, isPreview) {
-    try {
-      if (!USER_SETTING.PREFER_DASH_MANIFEST || !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA) return false;
-      if (!mediaItem || !mediaItem.video_dash_manifest) return false;
-      var best = parseDashManifest(mediaItem.video_dash_manifest);
-      var vUrl = best && best.video ? best.video.url : "";
-      if (!vUrl) return false;
-      var aUrl = best && best.audio ? best.audio.url : "";
-      var progressiveUrl = mediaItem.video_versions && mediaItem.video_versions[0] && mediaItem.video_versions[0].url;
-      var thumbnailURL =
-        (mediaItem.image_versions2 && mediaItem.image_versions2.candidates && mediaItem.image_versions2.candidates[0] &&
-          mediaItem.image_versions2.candidates[0].url) ||
-        (mediaItem.display_resources && mediaItem.display_resources[0] && mediaItem.display_resources[0].src) ||
-        mediaItem.display_url ||
-        meta.thumbnailURL;
-      var dashMeta = Object.assign({}, meta, { thumbnailURL: thumbnailURL });
-      if (isPreview) {
-        if (USER_SETTING.NEW_TAB_HIGHEST_VIDEO) {
-          openNewTab(vUrl);
-        } else {
-          openNewTab(progressiveUrl || vUrl);
-        }
-        return true;
-      }
-      if (!aUrl) {
-        await saveFiles(vUrl, Object.assign({}, dashMeta, { filetype: "mp4" }));
-        return true;
-      }
-      await downloadDashStreams(vUrl, aUrl, dashMeta);
-      return true;
-    } catch (e) {
-      logger("[DASH]", "mux failed, using single-file fallback:", e && e.message ? e.message : e);
+    if (
+      !USER_SETTING.PREFER_DASH_MANIFEST ||
+      !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA ||
+      !mediaItem?.video_dash_manifest
+    )
       return false;
+    const { video, audio } = parseDashManifest(mediaItem.video_dash_manifest);
+    if (!video) return false;
+    if (isPreview) return USER_SETTING.NEW_TAB_HIGHEST_VIDEO && openNewTab(video.url);
+    if (!audio) return false; // A progressive MP4 can contain sound; do not silently save a silent track instead.
+    updateLoadingBar(true);
+    try {
+      let merged;
+      try {
+        const [v, a] = await Promise.all([fetchArrayBuffer(video.url), fetchArrayBuffer(audio.url)]);
+        merged = new Blob([await muxDashVideoAudioToMp4(v, a)], { type: "video/mp4" });
+      } catch (e) {
+        logger("DASH unavailable; trying offered progressive media", e.message);
+        return false;
+      }
+      // A failed file handoff is not a demux failure. Do not retry it as a second download.
+      await createSaveFileElement(video.url, merged, { ...(await resolveFilenameUID(meta)), filetype: "mp4" });
+      return true;
+    } finally {
+      updateLoadingBar(false);
     }
   }
 
-  async function downloadResource(item, meta, opts) {
-    opts = opts || {};
-    var dashCandidate = item.dash || state.GL_mediaDataCache[item.id] || null;
-    if (dashCandidate && (!opts.preview || USER_SETTING.NEW_TAB_HIGHEST_VIDEO)) {
-      var okDash = await tryDashDownload(dashCandidate, meta, !!opts.preview);
-      if (okDash) return true;
-    }
-    if (!opts.preview && !item.isVideo && item.id && USER_SETTING.CAPTURE_IMAGE_VIA_MEDIA_CACHE) {
-      var cached = getImageFromCache(item.id);
-      if (cached) {
-        var okCache = await saveFiles(
-          cached,
-          Object.assign({}, meta, {
-            caption: item.caption || meta.caption,
-            index: meta.index != null ? meta.index : 0,
-            filetype: "jpg",
-          })
-        );
-        if (okCache) return true;
+  async function downloadResource(item, meta, opts = {}) {
+    if (!item) return false;
+    meta = {
+      ...meta,
+      sourceType:
+        !meta.sourceType || meta.sourceType === "post" ? (item.isVideo ? "video" : "photo") : meta.sourceType,
+      caption: item.caption || meta.caption,
+      timestamp: item.takenAt || meta.timestamp,
+      thumbnailURL: item.thumb || meta.thumbnailURL,
+      index: item._igSourceIndex || meta.index || 1
+    };
+    if (item.dash) {
+      try {
+        if (await tryDashDownload(item.dash, meta, !!opts.preview)) return true;
+      } catch (e) {
+        Toasts.error("Download failed: " + e.message);
+        return false;
       }
     }
     if (opts.preview) {
@@ -2397,8 +2172,7 @@
         Toasts.error("Cannot find download URL.");
         return false;
       }
-      openNewTab(replaceSameOriginHost(item.url));
-      return true;
+      return openNewTab(item.url);
     }
     if (!item.url) {
       Toasts.error("Cannot find download URL.");
@@ -2408,42 +2182,60 @@
       caption: item.caption || meta.caption,
       index: meta.index != null ? meta.index : 0,
       filetype: item.ext || meta.filetype || (item.isVideo ? "mp4" : "jpg"),
-      thumbnailURL: item.thumb || meta.thumbnailURL,
+      thumbnailURL: item.thumb || meta.thumbnailURL
     });
-    return await saveFiles(item.url, finalMeta);
+    const alternate =
+      !item.isVideo && item.id && USER_SETTING.CAPTURE_IMAGE_VIA_MEDIA_CACHE ? getImageFromCache(item.id) : null;
+    return saveFiles(item.url, finalMeta, alternate);
   }
 
   async function batchDownload(items, meta) {
-    var total = items.length;
-    if (!total) return;
-    var done = 0;
-    Progress.set(0, total);
-    for (var i = 0; i < total; i++) {
-      try {
-        var itemMeta = Object.assign({}, meta, { index: items[i]._igSourceIndex || i + 1 });
-        if (items[i].takenAt && USER_SETTING.RENAME_PUBLISH_DATE) {
-          itemMeta.timestamp = items[i].takenAt;
-        }
-        if ((meta.sourceType === "stories" || meta.sourceType === "highlights") && items[i].id) {
-          itemMeta.shortcode = items[i].id;
-        }
-        await downloadResource(items[i], itemMeta, {});
-      } catch (e) {
-        logger("batch item failed:", e && e.message ? e.message : e);
-      }
-      done++;
-      Progress.set(done, total);
-      if (done < total) {
-        await new Promise(function (r) {
-          setTimeout(r, 350);
-        });
-      }
+    if (!items.length) return { saved: 0, failed: 0, skipped: 0 };
+    if (state.batchActive) {
+      Toasts.info("A batch is already running.");
+      return null;
     }
-    notify(NAME, "Downloaded " + done + " of " + total + " items.");
+    state.batchActive = true;
+    const route = location.href;
+    let saved = 0,
+      failed = 0;
+    try {
+      Progress.set(0, items.length);
+      for (const [i, item] of items.entries()) {
+        if (location.href !== route) break;
+        const details = { ...meta, index: item._igSourceIndex || i + 1 };
+        if ((meta.sourceType === "stories" || meta.sourceType === "highlights") && item.id)
+          details.shortcode = item.id;
+        try {
+          if (await downloadResource(item, details)) saved++;
+          else failed++;
+        } catch (_) {
+          failed++;
+        }
+        Progress.set(i + 1, items.length);
+        if (i + 1 < items.length) await new Promise((r) => setTimeout(r, 350));
+      }
+      const skipped = items.length - saved - failed;
+      notify(
+        NAME,
+        `Saved ${saved} of ${items.length} items` +
+          (failed ? ` · ${failed} failed` : "") +
+          (skipped ? ` · ${skipped} skipped` : "") +
+          "."
+      );
+      return { saved, failed, skipped };
+    } finally {
+      state.batchActive = false;
+      if (!state.busy) Progress.hide();
+    }
   }
 
+  /* ============================================================
+     Ignis Render — UI (download dialog, dashboard, viewer)
+     ============================================================ */
+
   const INTERNAL_CSS = `
-:root{
+:where(.ignis-modal,.ignis-toasts,.ignis-progress,.ignis-palette,.ignis-ksh,.ignis-bar,.ignis-storytools,.ignis-rd,.ignis-rn,.ignis-pd,.ignis-gd){
   --ig-brand:#f43f5e;
   --ig-brand-2:#fb923c;
   --ig-accent:#f97316;
@@ -2465,7 +2257,7 @@
   --ig-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
 @media (prefers-color-scheme:dark){
-  :root{
+  :where(.ignis-modal,.ignis-toasts,.ignis-progress,.ignis-palette,.ignis-ksh,.ignis-bar,.ignis-storytools,.ignis-rd,.ignis-rn,.ignis-pd,.ignis-gd){
     --ig-surface:#17171b;
     --ig-surface-2:#1f1f25;
     --ig-surface-3:#2a2a32;
@@ -2646,9 +2438,9 @@
 .ignis-sd svg,.ignis-sn svg,.ignis-sa svg,.ignis-st svg,.ignis-tp svg,.ignis-sl svg,.ignis-hd svg,.ignis-hn svg,.ignis-ha svg,.ignis-ht svg,.ignis-htp svg,.ignis-hl svg{width:17px;height:17px}
 .ignis-sb-pos{position:relative;z-index:12;min-width:28px;height:20px;padding:0 7px;border-radius:999px;background:rgba(16,16,20,.72);color:#fff;font:700 10px var(--ig-font);display:flex;align-items:center;justify-content:center;pointer-events:none;letter-spacing:.04em;border:1px solid rgba(255,255,255,.14);margin-top:1px}
 
-.ignis-rd{position:absolute;z-index:12;width:36px;height:36px;border:none;border-radius:11px;background:rgba(16,16,20,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.16);color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s;box-shadow:0 4px 14px rgba(0,0,0,.3)}
-.ignis-rd:hover{background:rgba(255,255,255,.18);transform:scale(1.05)}
-.ignis-rd svg{width:17px;height:17px}
+.ignis-rd,.ignis-rn{position:absolute;z-index:12;width:36px;height:36px;border:none;border-radius:11px;background:rgba(16,16,20,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.16);color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s;box-shadow:0 4px 14px rgba(0,0,0,.3)}
+.ignis-rd:hover,.ignis-rn:hover{background:rgba(255,255,255,.18);transform:scale(1.05)}
+.ignis-rd svg,.ignis-rn svg{width:17px;height:17px}
 .ignis-rn{position:absolute;z-index:12;width:36px;height:36px;border:none;border-radius:11px;background:rgba(16,16,20,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.16);color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s;box-shadow:0 4px 14px rgba(0,0,0,.3)}
 .ignis-rn:hover{background:rgba(255,255,255,.18);transform:scale(1.05)}
 .ignis-rn svg{width:17px;height:17px}
@@ -2688,10 +2480,27 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   .ignis-actions{padding:4px 6px 8px}
   .ignis-row{padding:10px}
 }
+
+.ignis-position-host{position:relative}
+.ignis-template-link{background:none;color:inherit;font:inherit;border:0;padding:0;text-align:start;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.ignis-bar button:focus-visible,.ignis-storytools button:focus-visible,.ignis-modal button:focus-visible,.ignis-checkmark:focus-visible{outline:2px solid #e86829;outline-offset:2px}
+@media(prefers-reduced-motion:reduce){.ignis-modal,.ignis-modal-card,.ignis-toast,.ignis-palette *{transition:none!important;animation:none!important}}
 `;
 
-  GM_addStyle(INTERNAL_CSS);
 
+  function installStyle() {
+    if (typeof GM_addStyle === "function") {
+      try {
+        GM_addStyle(INTERNAL_CSS);
+        return;
+      } catch (_) {}
+    }
+    const style = document.createElement("style");
+    style.textContent = INTERNAL_CSS;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  // ─── Modal stack ───────────────────────────────────────────────────────
   const ModalStack = {
     modals: [],
     push: function (m) {
@@ -2710,8 +2519,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
 
   function createModal(opts) {
     opts = opts || {};
+    const opener = document.activeElement;
+    let closed = false,
+      endDrag = null;
     var root = $('<div class="ignis-modal">');
     var card = $('<div class="ignis-modal-card" role="dialog" aria-modal="true">');
+    card.attr("aria-label", opts.title || "IGNIS");
     var head = $('<div class="ignis-modal-head">');
     var title = $('<div class="ignis-modal-title">');
     if (opts.title) title.append(esc(opts.title));
@@ -2735,6 +2548,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       foot: foot,
       title: title,
       close: function () {
+        if (closed) return;
+        closed = true;
+        if (endDrag) endDrag();
+        const restore = root[0].contains(document.activeElement);
+        root[0].inert = true;
+        if (restore && opener?.isConnected) opener.focus({ preventScroll: true });
         root.removeClass("ignis-modal-in");
         setTimeout(function () {
           root.remove();
@@ -2742,11 +2561,29 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         var i = ModalStack.modals.indexOf(api);
         if (i > -1) ModalStack.modals.splice(i, 1);
         $(document).off("keydown.igmodal", onKey);
-      },
+      }
     };
     function onKey(e) {
+      if (closed || ModalStack.modals.at(-1) !== api || document.querySelector(".ignis-palette")) return;
+      if (e.key === "Tab") {
+        const nodes = card
+          .find(
+            'button:enabled:visible,input:enabled:visible,textarea:visible,a[href]:visible,[tabindex="0"]:visible'
+          )
+          .toArray()
+          .filter((n) => n.tabIndex >= 0);
+        const first = nodes[0],
+          last = nodes.at(-1);
+        if (first && e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (last && !e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+        return;
+      }
       if (e.key !== "Escape") return;
-      if (ModalStack.modals[ModalStack.modals.length - 1] !== api) return;
       e.preventDefault();
       api.close();
     }
@@ -2769,14 +2606,16 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         var maxY = Math.max(8, window.innerHeight - 48);
         card.css({
           left: Math.min(maxX, Math.max(8, ox + ev.clientX - sx)) + "px",
-          top: Math.min(maxY, Math.max(8, oy + ev.clientY - sy)) + "px",
+          top: Math.min(maxY, Math.max(8, oy + ev.clientY - sy)) + "px"
         });
       }
       function onUp() {
         $(document).off("mousemove.igdrag", onMove);
         $(document).off("mouseup.igdrag", onUp);
         card.css("transition", "");
+        endDrag = null;
       }
+      endDrag = onUp;
       $(document).on("mousemove.igdrag", onMove);
       $(document).on("mouseup.igdrag", onUp);
     });
@@ -2784,116 +2623,75 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       if (e.target === root[0]) api.close();
     });
     setTimeout(function () {
+      if (closed) return;
       root.addClass("ignis-modal-in");
+      if (ModalStack.modals.at(-1) === api && !root[0].contains(document.activeElement)) closeBtn.trigger("focus");
     }, 10);
     return ModalStack.push(api);
   }
 
+  // ─── Post download dialog ──────────────────────────────────────────────
   function buildPostItems(payload, postPath) {
     var res = normalizePostResource(payload.resource);
-    res.items.forEach(function (it) {
-      if (it.dash) state.GL_mediaDataCache[it.id] = it.dash;
-    });
     return {
       items: res.items,
       meta: {
         username: res.username || "NONE",
+        uid: res.uid,
         shortcode: res.shortcode || postPath,
         sourceType: "post",
         timestamp: res.takenAt || Math.floor(Date.now() / 1000),
-        caption: res.caption || null,
+        caption: res.caption || null
       },
-      fromDom: false,
+      fromDom: false
     };
   }
 
   function extractPostFromDom(postPath, ctx) {
     var $post = null;
-    if (ctx && ctx.post) {
-      $post = $(ctx.post);
-    } else if (ctx && ctx.anchor) {
-      var a = ctx.anchor;
-      var img = a.querySelector("img");
-      if (img) {
-        var srcset = parseSrcset(img.getAttribute("srcset") || "");
-        var url = (srcset.length ? srcset[srcset.length - 1].url : null) || img.getAttribute("src") || "";
-        if (url) {
-          return {
-            items: [
-              {
-                id: decodeMediaIdFromUrl(url),
-                isVideo: false,
-                url: url,
-                thumb: url,
-                width: 0,
-                height: 0,
-                caption: null,
-                dash: null,
-                ext: /\.webp(\?|$)/i.test(url) ? "webp" : "jpg",
-              },
-            ],
-            meta: {
-              username: "NONE",
-              shortcode: postPath,
-              sourceType: "post",
-              timestamp: Math.floor(Date.now() / 1000),
-              caption: null,
-            },
-            fromDom: true,
-          };
-        }
-      }
-      return null;
-    } else {
+    if (ctx?.post || ctx?.anchor) $post = $(ctx.post || ctx.anchor);
+    else
       $post = $('[data-snig="canDownload"]')
-        .filter(function () {
-          return $(this).find('a[href*="/' + postPath + '/"]').length > 0;
-        })
+        .filter((_, el) => Array.from(el.querySelectorAll("a[href]")).some((a) => postCode(a.href) === postPath))
         .first();
-    }
-    if (!$post || !$post.length) return null;
-    if ($post.find("video[src^='blob:']").length) return null;
-    var items = [];
-    var seen = new Set();
-    var username = $post.attr("data-username") || getPostUsername($post) || "NONE";
-    $post.find("img[src]").each(function () {
-      var r = this.getBoundingClientRect();
-      if (r.width < 150 || r.height < 150) return;
-      var $img = $(this);
-      var srcset = parseSrcset($img.attr("srcset") || "");
-      var url = (srcset.length ? srcset[srcset.length - 1].url : null) || $img.attr("src") || "";
-      if (!url || seen.has(url)) return;
-      seen.add(url);
+    if (!$post?.length) return null;
+    const items = [],
+      seen = new Set(),
+      username = getPostUsername($post) || "NONE";
+    // Walk images and videos in their actual carousel order. A blob video is not
+    // itself a downloadable URL, and must not hide its downloadable neighbours.
+    $post.find("img, video").each(function () {
+      if (this.closest("header,nav,.ignis-modal,.ignis-bar")) return;
+      const rect = this.getBoundingClientRect(),
+        video = this.tagName === "VIDEO";
+      if (!video && (rect.width < 150 || rect.height < 100)) return;
+      const url = video
+        ? trustedURL(this.currentSrc || this.src || this.querySelector("source[src]")?.src)
+        : domImage(this);
+      const li = this.closest("li");
+      const pos = slideOrdinal(li) || items.length + 1,
+        identity = (li ? pos + ":" : "") + url;
+      if (!url || seen.has(identity)) return;
+      seen.add(identity);
       items.push({
         id: decodeMediaIdFromUrl(url),
-        isVideo: false,
-        url: url,
-        thumb: url,
-        width: Math.round(r.width),
-        height: Math.round(r.height),
+        isVideo: video,
+        url,
+        thumb: video ? trustedURL(this.poster) : url,
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
         caption: null,
         dash: null,
-        ext: /\.webp(\?|$)/i.test(url) ? "webp" : "jpg",
+        ext: mediaExtension(url, video ? "mp4" : "jpg"),
+        _igSourceIndex: pos
       });
     });
-    var $v = $post.find("video").first();
-    if ($v.length) {
-      var vUrl = $v.attr("src") || "";
-      if (/^https?:/i.test(vUrl)) {
-        items.push({
-          id: decodeMediaIdFromUrl(vUrl),
-          isVideo: true,
-          url: vUrl,
-          thumb: null,
-          width: 0,
-          height: 0,
-          caption: null,
-          dash: null,
-          ext: "mp4",
-        });
-      }
-    }
     if (!items.length) return null;
+    if (items.length === 1 && postCode(location.href) === postPath) {
+      const index = Number(new URL(location.href).searchParams.get("img_index"));
+      if (Number.isSafeInteger(index) && index > 0 && !$post.find("li[aria-posinset],li[style*=translate]").length)
+        items[0]._igSourceIndex = index;
+    }
     var ts = Math.floor(Date.now() / 1000);
     var $t = $post.find("time[datetime]").first();
     if ($t.length) {
@@ -2903,15 +2701,22 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     return {
       items: items,
       meta: { username: username, shortcode: postPath, sourceType: "post", timestamp: ts, caption: null },
-      fromDom: true,
+      fromDom: true
     };
   }
 
   async function loadPostItems(postPath, ctx) {
-    var instant = extractPostFromDom(postPath, ctx);
-    if (instant) return instant;
-    var payload = await getPostPayload(postPath);
-    return buildPostItems(payload, postPath);
+    const embedded = extractPostFromPageJson(postPath);
+    if (embedded) return buildPostItems(embedded, postPath);
+    const instant = extractPostFromDom(postPath, ctx);
+    if (instant && (!ctx?.complete || !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA)) return instant;
+    try {
+      const rich = buildPostItems(await getPostPayload(postPath, true), postPath);
+      if (rich.items.length || !instant) return rich;
+    } catch (e) {
+      if (!instant || e.stopLookup) throw e;
+    }
+    return instant;
   }
 
   function renderItems(body, items, meta) {
@@ -2922,7 +2727,8 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
     var grid = $('<div class="ignis-grid">');
     items.forEach(function (item, i) {
-      item._igSourceIndex = i + 1;
+      item._igSourceIndex ||= i + 1;
+      const caption = item.caption || meta.caption;
       var row = $('<div class="ignis-item is-selected" data-idx="' + i + '">');
       var input = $('<input type="checkbox" checked tabindex="-1" aria-hidden="true">');
       var media = $('<div class="ignis-card-media">');
@@ -2943,70 +2749,84 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         esc(dims) +
         esc(item.ext || "") +
         "</span></div>";
-      var cap = item.caption
-        ? '<div class="ignis-cap">' + esc(item.caption.slice(0, 180)) + "</div>"
-        : "";
+      var cap = caption ? '<div class="ignis-cap">' + esc(caption.slice(0, 180)) + "</div>" : "";
       var actions = $('<div class="ignis-actions">');
       actions.append(
         '<button class="ignis-act ig-act-dl" title="Download" aria-label="Download">' + SVG.DOWNLOAD + "</button>",
-        '<button class="ignis-act ig-act-nt" title="Open in new tab" aria-label="Open in new tab">' + SVG.NEW_TAB + "</button>"
+        '<button class="ignis-act ig-act-nt" title="Open in new tab" aria-label="Open in new tab">' +
+          SVG.NEW_TAB +
+          "</button>"
       );
       if (item.thumb && item.isVideo) {
         actions.append(
-          '<button class="ignis-act ig-act-th" title="Download thumbnail" aria-label="Download thumbnail">' + SVG.THUMBNAIL + "</button>"
+          '<button class="ignis-act ig-act-th" title="Download thumbnail" aria-label="Download thumbnail">' +
+            SVG.THUMBNAIL +
+            "</button>"
         );
       }
-      if (item.caption) {
+      if (caption) {
         actions.append(
-          '<button class="ignis-act ig-act-cap" title="Download caption (.txt)" aria-label="Download caption">' + SVG.TEXT + "</button>"
+          '<button class="ignis-act ig-act-cap" title="Download caption (.txt)" aria-label="Download caption">' +
+            SVG.TEXT +
+            "</button>"
         );
       }
       row.append(input, media, $('<div class="ignis-card-body">').append(type, cap), actions);
       grid.append(row);
     });
     body.append(grid);
-    body.off(".igitem").on("click.igitem", ".ignis-item", function (e) {
-      if ($(e.target).closest(".ignis-checkmark").length) {
-        var cb = $(this).find('input[type="checkbox"]')[0];
-        if (cb) {
-          cb.checked = !cb.checked;
-          $(this).toggleClass("is-selected", cb.checked);
-          $(e.target).closest(".ignis-checkmark").attr("aria-checked", cb.checked ? "true" : "false");
-          $(cb).trigger("change");
+    body
+      .off(".igitem")
+      .on("click.igitem", ".ignis-item", function (e) {
+        if ($(e.target).closest(".ignis-checkmark").length) {
+          var cb = $(this).find('input[type="checkbox"]')[0];
+          if (cb) {
+            cb.checked = !cb.checked;
+            $(this).toggleClass("is-selected", cb.checked);
+            $(e.target)
+              .closest(".ignis-checkmark")
+              .attr("aria-checked", cb.checked ? "true" : "false");
+            $(cb).trigger("change");
+          }
+          e.preventDefault();
+          return;
         }
-        e.preventDefault();
-        return;
-      }
-      var act = $(e.target).closest(".ignis-act")[0];
-      if (!act) return;
-      e.stopPropagation();
-      var idx = parseInt($(this).attr("data-idx"), 10);
-      var item = items[idx];
-      if (!item) return;
-      var photoMeta = Object.assign({}, meta, {
-        sourceType: item.isVideo ? "video" : "photo",
-        index: item._igSourceIndex || idx + 1,
+        var act = $(e.target).closest(".ignis-act")[0];
+        if (!act) return;
+        e.stopPropagation();
+        var idx = parseInt($(this).attr("data-idx"), 10);
+        var item = items[idx];
+        if (!item) return;
+        var photoMeta = Object.assign({}, meta, {
+          sourceType: meta.sourceType === "post" ? (item.isVideo ? "video" : "photo") : meta.sourceType,
+          shortcode: meta.sourceType === "stories" || meta.sourceType === "highlights" ? item.id : meta.shortcode,
+          timestamp: item.takenAt || meta.timestamp,
+          index: item._igSourceIndex || idx + 1
+        });
+        if (act.classList.contains("ig-act-dl")) {
+          downloadResource(item, photoMeta, {});
+        } else if (act.classList.contains("ig-act-nt")) {
+          downloadResource(item, photoMeta, { preview: true });
+        } else if (act.classList.contains("ig-act-th") && item.thumb) {
+          saveFiles(item.thumb, Object.assign({}, photoMeta, { sourceType: "thumbnail", filetype: "jpg" }));
+        } else if (act.classList.contains("ig-act-cap") && (item.caption || meta.caption)) {
+          const text = item.caption || meta.caption;
+          const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+          const capMeta = { ...photoMeta, filetype: "txt" };
+          resolveFilenameUID(capMeta)
+            .then((meta) => triggerDownload(blob, getSaveFileName(item.url, meta)))
+            .then(
+              () => Stats.record("caption", blob.size),
+              () => Toasts.error("Could not save caption.")
+            );
+        }
+      })
+      .on("keydown.igitem", ".ignis-checkmark", function (e) {
+        if (e.key === " " || e.key === "Enter") {
+          e.preventDefault();
+          $(this).trigger("click");
+        }
       });
-      if (act.classList.contains("ig-act-dl")) {
-        downloadResource(item, photoMeta, {});
-      } else if (act.classList.contains("ig-act-nt")) {
-        downloadResource(item, photoMeta, { preview: true });
-      } else if (act.classList.contains("ig-act-th") && item.thumb) {
-        saveFiles(item.thumb, Object.assign({}, meta, { sourceType: "thumbnail", filetype: "jpg" }));
-      } else if (act.classList.contains("ig-act-cap") && item.caption) {
-        var capMeta = Object.assign({}, photoMeta, { caption: item.caption, filetype: "txt" });
-        triggerDownload(
-          new Blob([item.caption], { type: "text/plain;charset=utf-8" }),
-          getSaveFileName(item.url, capMeta)
-        );
-        Stats.record("caption", 0);
-      }
-    }).on("keydown.igitem", ".ignis-checkmark", function (e) {
-      if (e.key === " " || e.key === "Enter") {
-        e.preventDefault();
-        $(this).trigger("click");
-      }
-    });
   }
 
   function attachSelectionFooter(modal, getItems, getMeta, extra) {
@@ -3014,12 +2834,8 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       '<label class="ignis-sel" title="Select / deselect all"><input type="checkbox" checked><span></span>Select all<b class="ignis-count"></b></label>'
     );
     var countBadge = selectAll.find(".ignis-count");
-    var dlSel = $(
-      '<button class="ignis-btn ignis-btn-pri" disabled>' + SVG.DOWNLOAD + " Download Selected</button>"
-    );
-    var dlAll = $(
-      '<button class="ignis-btn ignis-btn-sec">' + SVG.DOWNLOAD_ALL + " Download All</button>"
-    );
+    var dlSel = $('<button class="ignis-btn ignis-btn-pri" disabled>' + SVG.DOWNLOAD + " Download Selected</button>");
+    var dlAll = $('<button class="ignis-btn ignis-btn-sec">' + SVG.DOWNLOAD_ALL + " Download All</button>");
 
     function refresh() {
       var checks = modal.body.find('.ignis-item input[type="checkbox"]');
@@ -3029,10 +2845,13 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       selectAll.find("input").prop("indeterminate", selected > 0 && selected < total);
       countBadge.text(total ? selected + "/" + total : "");
       dlSel.prop("disabled", selected === 0);
+      dlAll.prop("disabled", total === 0);
       modal.body.find(".ignis-item").each(function () {
         var checked = !!$(this).find('input[type="checkbox"]').prop("checked");
         $(this).toggleClass("is-selected", checked);
-        $(this).find(".ignis-checkmark").attr("aria-checked", checked ? "true" : "false");
+        $(this)
+          .find(".ignis-checkmark")
+          .attr("aria-checked", checked ? "true" : "false");
       });
     }
 
@@ -3072,51 +2891,33 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   }
 
   async function openPostDialog(postPath, ctx) {
-    var modal = createModal({ title: "Download post", sub: postPath });
+    const modal = createModal({ title: "Download post", sub: postPath });
     modal.body.append('<div class="ignis-load"><i></i>Loading media…</div>');
-    var loaded;
+    let loaded;
     try {
-      loaded = await loadPostItems(postPath, ctx);
+      loaded = ctx?.initial || (await loadPostItems(postPath, { ...ctx, complete: true }));
     } catch (e) {
-      modal.body.empty().append(
-        '<div class="ignis-empty">Could not load this post: ' + esc((e && e.message) || "network error") + "</div>"
-      );
+      modal.body.empty().append($("<div class='ignis-empty'>").text("Could not load this post: " + e.message));
       return null;
     }
-    if (!modal.el.is(":visible")) return loaded;
-    var current = { items: loaded.items, meta: loaded.meta };
-    function updateHead() {
-      var user = current.meta && current.meta.username && current.meta.username !== "NONE" ? "@" + current.meta.username + " · " : "";
-      modal.title.find(".ignis-sub").text(user + current.items.length + " item" + (current.items.length === 1 ? "" : "s"));
-    }
-    renderItems(modal.body, current.items, current.meta);
-    updateHead();
-    var selection = attachSelectionFooter(
+    if (!modal.el[0].isConnected || modal.el[0].inert) return null;
+    const { items, meta } = loaded;
+    const author = meta.username && meta.username !== "NONE" ? "@" + meta.username + " · " : "";
+    modal.title.find(".ignis-sub").text(author + items.length + (items.length === 1 ? " item" : " items"));
+    renderItems(modal.body, items, meta);
+    if (loaded.fromDom)
+      modal.body.prepend(
+        '<p class="ignis-hint">Showing only media loaded on this page. The full post may contain more items.</p>'
+      );
+    attachSelectionFooter(
       modal,
-      function () {
-        return current.items;
-      },
-      function () {
-        return current.meta;
-      }
+      () => items,
+      () => meta
     );
-    if (loaded.fromDom) {
-      getPostPayload(postPath)
-        .then(function (payload) {
-          var rich = buildPostItems(payload, postPath);
-          if (rich.items.length && modal.el.is(":visible")) {
-            current.items = rich.items;
-            current.meta = rich.meta;
-            renderItems(modal.body, current.items, current.meta);
-            updateHead();
-            selection.refresh();
-          }
-        })
-        .catch(function () {});
-    }
     return loaded;
   }
 
+  // ─── Story / highlight dialogs ─────────────────────────────────────────
   function openStoryDialog(payload, type) {
     var reel = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0];
     if (!reel) {
@@ -3155,6 +2956,8 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     return modal;
   }
 
+
+  // ─── Filename template editor ──────────────────────────────────────────
   function openRenameEditor() {
     var modal = createModal({ title: "Filename template", sub: "Auto rename" });
     var wrap = $('<div class="ignis-rename">');
@@ -3233,9 +3036,10 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     return modal;
   }
 
+  // ─── Dashboard settings ────────────────────────────────────────────────
   function showSetting(tab) {
-    if (tab) state._igTab = tab;
-    if (!CAT_MAP[state._igTab] && state._igTab !== "about") state._igTab = "download";
+    if (typeof tab === "string") state._igTab = tab;
+    if (!CATS.some((c) => c[0] === state._igTab) && state._igTab !== "about") state._igTab = "download";
     while (ModalStack.modals.length) ModalStack.pop();
     $(".ignis-modal").remove();
     var modal = createModal({ title: NAME + " Settings", sub: "v" + VERSION });
@@ -3244,8 +3048,14 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     var search = $('<input class="ignis-search" type="search" placeholder="Search settings…">');
     var list = $("<div>");
     var hero = $(
-      '<div class="ignis-hero"><div class="ignis-hero-mark">' + SVG.SPARK + "</div>" +
-        "<div><h3>" + esc(NAME) + "</h3><p>Instagram media downloader · v" + esc(VERSION) + "</p></div></div>"
+      '<div class="ignis-hero"><div class="ignis-hero-mark">' +
+        SVG.SPARK +
+        "</div>" +
+        "<div><h3>" +
+        esc(NAME) +
+        "</h3><p>Instagram media downloader · v" +
+        esc(VERSION) +
+        "</p></div></div>"
     );
     modal.body.append(hero, tabs, search, list);
 
@@ -3290,19 +3100,23 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       var keys = [
         ["settings", "Open Settings", "settingsHotkeyKeyCode"],
         ["downloadStory", "Download Story", "downloadStoryHotkeyKeyCode"],
-        ["debug", "Debug Window", "debugHotkeyKeyCode"],
+        ["debug", "Debug Window", "debugHotkeyKeyCode"]
       ];
       keys.forEach(function (k) {
         var code = state[k[2]];
         var row = $('<div class="ignis-keyrow" data-hotkey="' + k[2] + '">');
         row.append(
-          '<span class="ignis-kbd"><kbd>' + esc(getPlatformModifierKey()) + "</kbd>+<kbd>" + esc(keyName(code)) + "</kbd></span>",
+          '<span class="ignis-kbd"><kbd>' +
+            esc(getPlatformModifierKey()) +
+            "</kbd>+<kbd>" +
+            esc(keyName(code)) +
+            "</kbd></span>",
           $('<div class="ignis-row-txt"><div class="ignis-row-lb">' + esc(k[1]) + "</div></div>"),
           $('<button type="button">Rebind</button>')
         );
         row.on("click", function () {
           container.data("cap", k[2]);
-          row.find("button").text("Press a key…");
+          row.find("button").text("Press a key…").trigger("focus");
         });
         container.append(row);
       });
@@ -3323,7 +3137,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       thumbnail: "Thumbnails",
       avatar: "Profile Pictures",
       caption: "Captions",
-      other: "Other",
+      other: "Other"
     };
 
     function formatBytes(n) {
@@ -3356,7 +3170,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         ["Total downloads", String(s.items || 0)],
         ["Data saved", formatBytes(s.bytes)],
         ["Sessions", String(s.sessions || 0)],
-        ["Last download", s.lastAt ? new Date(s.lastAt).toLocaleDateString() : "—"],
+        ["Last download", s.lastAt ? new Date(s.lastAt).toLocaleDateString() : "—"]
       ].forEach(function (pair) {
         cards.append(
           '<div class="ignis-stat-card"><small>' +
@@ -3414,11 +3228,16 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
 
     function buildList(filter) {
-      list.empty();
+      filter = (filter ?? search.val()).trim().toLowerCase();
+      list.empty().removeData("cap");
       if (state._igTab === "about") {
         list.append(
           '<div class="ignis-about">' +
-            "<b>" + NAME + " v" + VERSION + "</b> downloads media from Instagram pages: posts, carousels, reels, stories, highlights, HD avatars and captions." +
+            "<b>" +
+            NAME +
+            " v" +
+            VERSION +
+            "</b> downloads media from Instagram pages: posts, carousels, reels, stories, highlights, HD avatars and captions." +
             '<div class="ignis-rt">' +
             ["IGNIS Core", "IGNIS Lens", "IGNIS Forge", "IGNIS Render", "IGNIS Pulse"]
               .map(function (r) {
@@ -3436,13 +3255,14 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         return;
       }
       if (state._igTab === "keyboard") {
-        renderHotkeyEditor(list);
-        return;
+        if (!filter) renderHotkeyEditor(list);
       }
       if (state._igTab === "stats") {
-        list.append(buildStatsPanel(function () {
-          buildList(filter);
-        }));
+        list.append(
+          buildStatsPanel(function () {
+            buildList(filter);
+          })
+        );
       }
       Object.keys(CAT_MAP)
         .filter(function (k) {
@@ -3457,26 +3277,34 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           Object.keys(PARENT_CHILD_MAPPING).forEach(function (p) {
             if (PARENT_CHILD_MAPPING[p].indexOf(k) > -1) parent = p;
           });
-          var disabled = parent ? !USER_SETTING[parent] : false;
+          var disabled = parent
+            ? !USER_SETTING[parent] || (parent === "PREFER_DASH_MANIFEST" && !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA)
+            : false;
           var row = $(
             '<div class="ignis-row ignis-row-wrap' + (disabled ? " ignis-row-dis" : "") + '" data-set="' + k + '">'
           );
           var sw = $(
-            '<label class="ignis-sw"><input type="checkbox" aria-label="' + esc(LABEL[k]) + '" ' +
+            '<label class="ignis-sw"><input type="checkbox" aria-label="' +
+              esc(LABEL[k]) +
+              '" ' +
               (USER_SETTING[k] ? "checked" : "") +
-              (disabled ? "disabled" : "") +
+              (disabled ? " disabled" : "") +
               "><i></i></label>"
           );
           row.append(
-            $('<div class="ignis-row-txt">')
-              .append(
-                '<div class="ignis-row-lb">' + esc(LABEL[k]) + "</div>",
-                '<div class="ignis-row-ds">' + esc(DESC[k]) + "</div>"
-              ),
+            $('<div class="ignis-row-txt">').append(
+              '<div class="ignis-row-lb">' + esc(LABEL[k]) + "</div>",
+              '<div class="ignis-row-ds">' + esc(DESC[k]) + "</div>"
+            ),
             sw
           );
           if (k === "AUTO_RENAME") {
-            row.find(".ignis-row-txt").css("cursor", "pointer").on("click", openRenameEditor);
+            row
+              .find(".ignis-row-lb")
+              .empty()
+              .append(
+                $('<button type="button" class="ignis-template-link">').text(LABEL[k]).on("click", openRenameEditor)
+              );
           }
           list.append(row);
         });
@@ -3491,8 +3319,27 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       e.preventDefault();
       e.stopPropagation();
       var code = e.keyCode || e.which;
+      if (e.key === "Escape") {
+        buildList();
+        return;
+      }
+      const keys = {
+        settingsHotkeyKeyCode: "SETTINGS",
+        downloadStoryHotkeyKeyCode: "DOWNLOAD_STORY",
+        debugHotkeyKeyCode: "DEBUG"
+      };
+      if (
+        !Object.hasOwn(keys, cap) ||
+        code < 65 ||
+        code > 90 ||
+        [81, 75, 84, 82].includes(code) ||
+        Object.keys(keys).some((k) => k !== cap && state[k] === code)
+      ) {
+        Toasts.info("Choose an unused letter, or Escape to cancel.");
+        return;
+      }
       state[cap] = code;
-      Store.set("G_HOTKEY_" + cap.replace("HotkeyKeyCode", "").toUpperCase() + "_KEYCODE", code);
+      Store.set("G_HOTKEY_" + keys[cap] + "_KEYCODE", code);
       list.data("cap", null);
       buildList();
     });
@@ -3508,10 +3355,10 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     });
 
     modal.el.on("contextmenu.igset", ".ignis-row[data-set]", function (e) {
-      e.preventDefault();
       var $row = $(this);
       var k = $row.attr("data-set");
       if (k !== "AUTO_RENAME") return;
+      e.preventDefault();
       openRenameEditor();
     });
 
@@ -3531,6 +3378,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     showSetting("keyboard");
   }
 
+  // ─── Debug & feedback ──────────────────────────────────────────────────
   function showDebugDOM() {
     var modal = createModal({ title: "Debug Window", sub: NAME + " v" + VERSION });
     var ta = $(
@@ -3540,9 +3388,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     modal.foot.append(
       $('<button class="ignis-btn ignis-btn-sec">Copy</button>').on("click", function () {
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(ta.val()).then(function () {
-            Toasts.success("Copied to clipboard.");
-          });
+          navigator.clipboard.writeText(ta.val()).then(
+            function () {
+              Toasts.success("Copied to clipboard.");
+            },
+            () => Toasts.error("Clipboard unavailable; select the text to copy.")
+          );
         } else {
           ta.trigger("select");
           document.execCommand("copy");
@@ -3550,11 +3401,13 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       }),
       $('<button class="ignis-btn ignis-btn-sec">Download</button>').on("click", function () {
         var blob = new Blob([ta.val()], { type: "text/plain;charset=utf-8" });
-        triggerDownload(blob, "ignis-debug-" + Date.now() + ".txt");
+        triggerDownload(blob, "ignis-debug-" + Date.now() + ".txt").catch(() =>
+          Toasts.error("Could not save debug log.")
+        );
       })
     );
     var lines = [];
-    lines.push(NAME + " v" + VERSION + " — URL: " + location.href);
+    lines.push(NAME + " v" + VERSION + " — URL: " + location.origin + location.pathname);
     lines.push("UA: " + navigator.userAgent);
     lines.push("");
     lines.push("— Log —");
@@ -3564,160 +3417,59 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     ta.val(lines.join("\n"));
   }
 
-  function showFeedbackDOM() {
-    var modal = createModal({ title: "About", sub: NAME + " v" + VERSION });
-    modal.body.append(
-      '<div class="ignis-about">' +
-        NAME +
-        " is an independent, self-contained userscript. It sends no data anywhere and is not affiliated with any other project or maintainer.</div>"
-    );
+  /* ============================================================
+     Ignis Pulse — page injection, download flows, router
+     ============================================================ */
+
+  // ─── Carousel visible-index detection ──────────────────────────────────
+  function slideOrdinal(li) {
+    if (!li) return null;
+    const explicit = Number(li.getAttribute("aria-posinset"));
+    if (Number.isSafeInteger(explicit) && explicit > 0) return explicit;
+    const translate = li.style.transform.match(/translate(?:X|3d)?\(\s*(-?\d+(?:\.\d+)?)px/i);
+    const width = li.getBoundingClientRect().width;
+    if (translate && width > 0 && Number(translate[1]) >= 0) return Math.round(Number(translate[1]) / width) + 1;
+    return Array.from(li.parentElement.children).indexOf(li) + 1;
   }
-
-  function tagCarouselSlides($ul) {
-    if (!$ul || !$ul.length) return;
-    var $slides = $ul.children("li").filter(function () {
-      var w = this.getBoundingClientRect().width;
-      return w > 64 && ($(this).find("img, video").length > 0 || $(this).attr("class"));
-    });
-    if (!$slides.length) return;
-
-    var slideWidth = 0;
-    $slides.each(function () {
-      var w = this.getBoundingClientRect().width;
-      if (w > 64 && !slideWidth) slideWidth = w;
-    });
-    if (!slideWidth) {
-      $slides.each(function () {
-        var m = ($(this).children("div").first().attr("style") || "").match(/width:\s*(\d+(?:\.\d+)?)px/);
-        if (m && !slideWidth) slideWidth = parseFloat(m[1]);
-      });
-    }
-    if (!slideWidth) {
-      var viewport = $ul.parent()[0];
-      slideWidth = viewport ? viewport.getBoundingClientRect().width : 0;
-    }
-
-    $slides.each(function () {
-      var li = this;
-      var style = li.getAttribute("style") || "";
-      if (style.indexOf("translateX") > -1 && slideWidth > 0) {
-        var m = style.match(/translateX\(([^p]+)px\)/);
-        if (m && m[1]) {
-          var pos = Math.round(parseFloat(m[1]) / slideWidth) + 1;
-          if (pos > 0) {
-            li.setAttribute("igh-res-index", String(pos));
-            return;
-          }
-        }
-      }
-      if (!li.hasAttribute("igh-res-index")) {
-        var prev = li.previousElementSibling;
-        var next = li.nextElementSibling;
-        if (prev && prev.hasAttribute("igh-res-index")) {
-          var prevPos = parseInt(prev.getAttribute("igh-res-index"), 10);
-          if (!isNaN(prevPos) && prevPos > 0) li.setAttribute("igh-res-index", String(prevPos + 1));
-        } else if (next && next.hasAttribute("igh-res-index")) {
-          var nextPos = parseInt(next.getAttribute("igh-res-index"), 10);
-          if (!isNaN(nextPos) && nextPos > 1) li.setAttribute("igh-res-index", String(nextPos - 1));
-        }
-      }
-    });
-  }
-
-  function isActivePostRoute() {
-    return /^\/(?:[^/]+\/)?(?:p|reel)\//.test(location.pathname);
-  }
-
   function getVisibleNodeIndex($main) {
-    if (!$main || !$main.length) return 0;
-
-    if (isActivePostRoute()) {
-      try {
-        var imgIndex = new URLSearchParams(window.location.search).get("img_index");
-        if (imgIndex) {
-          var parsedUrlIndex = parseInt(imgIndex, 10);
-          if (!isNaN(parsedUrlIndex) && parsedUrlIndex >= 1) return parsedUrlIndex - 1;
-        }
-      } catch (e) {
-
+    const post = $main?.[0];
+    if (!post) return 0;
+    if (postCode(location.href) && getPostContextFromButton(post).postPath === postCode(location.href)) {
+      const index = Number(new URL(location.href).searchParams.get("img_index"));
+      if (Number.isSafeInteger(index) && index >= 1) return index - 1;
+    }
+    const list = Array.from(post.querySelectorAll("ul,ol")).find((el) =>
+      el.querySelector(":scope > li img,:scope > li video")
+    );
+    if (!list) return 0;
+    const viewport = list.parentElement.getBoundingClientRect(),
+      mid = (Math.max(0, viewport.left) + Math.min(innerWidth, viewport.right)) / 2;
+    let nearest = null,
+      best = Infinity;
+    for (const slide of list.children) {
+      if (!slide.matches("li") || !slide.querySelector("img,video")) continue;
+      const r = slide.getBoundingClientRect();
+      if (!r.width || r.right <= Math.max(0, viewport.left) || r.left >= Math.min(innerWidth, viewport.right))
+        continue;
+      const distance = Math.abs((r.left + r.right) / 2 - mid);
+      if (distance < best) {
+        nearest = slide;
+        best = distance;
       }
     }
-
-    var $ul = $main.find("ul[class]").filter(function () {
-      return $(this).children("li").length > 0;
-    }).first();
-    if (!$ul.length) return 0;
-
-    tagCarouselSlides($ul);
-
-    var $slides = $ul.children("li").filter(function () {
-      var w = this.getBoundingClientRect().width;
-      return w > 64 && ($(this).find("img, video").length > 0 || $(this).attr("class"));
-    });
-    if ($slides.length <= 1) {
-      if ($slides.length === 1) {
-        var onlyPos = $slides.get(0).getAttribute("igh-res-index");
-        var onlyParsed = onlyPos ? parseInt(onlyPos, 10) : NaN;
-        if (!isNaN(onlyParsed) && onlyParsed >= 1) return onlyParsed - 1;
-      }
-      return 0;
-    }
-
-    var $viewport = $main.find(".button_wrapper").parent();
-    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) {
-      $viewport = $main
-        .find('*:not([data-pagelet])>*:not([role]):not([data-pagelet])>*:not([style])>*>*[role="presentation"]>*>ul[class]')
-        .parent()
-        .parent("[role]");
-    }
-    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) $viewport = $ul.parent().parent();
-    if (!$viewport.length || $viewport.get(0).getBoundingClientRect().width === 0) $viewport = $ul.parent();
-
-    if ($viewport.length) {
-      var viewportRect = $viewport.get(0).getBoundingClientRect();
-      var fallbackWidth = viewportRect.width;
-      if (fallbackWidth > 0) {
-        var viewportCenter = (viewportRect.left + viewportRect.right) / 2;
-        var closestSlide = null;
-        var minDistance = Infinity;
-        $slides.each(function () {
-          if (this.getBoundingClientRect().width === 0) return;
-          var rect = this.getBoundingClientRect();
-          var distance = Math.abs((rect.left + rect.right) / 2 - viewportCenter);
-          if (distance < minDistance) {
-            minDistance = distance;
-            closestSlide = this;
-          }
-        });
-        if (closestSlide) {
-          var ighPos = closestSlide.getAttribute("igh-res-index");
-          var parsedPos = ighPos ? parseInt(ighPos, 10) : NaN;
-          if (!isNaN(parsedPos) && parsedPos >= 1) return parsedPos - 1;
-          var style = closestSlide.getAttribute("style") || "";
-          var offsetMatch = style.match(/translateX\(([^p]+)px\)/);
-          if (offsetMatch && offsetMatch[1]) {
-            var offset = parseFloat(offsetMatch[1]);
-            var width = closestSlide.getBoundingClientRect().width || fallbackWidth;
-            if (width > 0) {
-              var offsetIndex = Math.round(offset / width);
-              if (offsetIndex >= 0) return offsetIndex;
-            }
-          }
-          return Math.max(0, $slides.index(closestSlide));
-        }
-      }
-    }
-    return 0;
+    return nearest ? slideOrdinal(nearest) - 1 : -1;
   }
 
+  // ─── Shared IntersectionObserver ───────────────────────────────────────
   let sharedIO = null;
-  const ioCallbacks = new WeakMap();
+  let ioCallbacks = new WeakMap();
   function getIO() {
     if (!sharedIO && typeof IntersectionObserver !== "undefined") {
       sharedIO = new IntersectionObserver(
         function (entries) {
           entries.forEach(function (en) {
             if (en.isIntersecting) {
+              sharedIO?.unobserve(en.target);
               var cb = ioCallbacks.get(en.target);
               if (cb) {
                 ioCallbacks.delete(en.target);
@@ -3742,25 +3494,21 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     io.observe(el);
   }
 
+  // ─── Universal post/media detection ────────────────────────────────────
   function looksLikePost(el) {
     if (!el || el.nodeType !== 1) return false;
     if (el.closest(".ignis-bar, .ignis-sb, .ignis-rd, .ignis-modal, .ignis-gd")) return false;
     var isDiv = el.tagName === "DIV";
     var hasHeader = el.querySelector(":scope > header, :scope > div > header") != null;
-    var hasLink = el.querySelector('a[href^="/p/"], a[href^="/reel/"]') != null;
-    var hasMedia =
-      el.querySelector("video, img[src*='cdninstagram'], img[src*='fbcdn.net']") != null;
+    var hasLink = Array.from(el.querySelectorAll("a[href]")).some((a) => postCode(a.href));
+    var hasMedia = el.querySelector("video, img[src*='cdninstagram'], img[src*='fbcdn.net']") != null;
     if (!hasLink && !hasHeader) return false;
     if (!hasMedia) return false;
     if (isDiv && el.closest("article")) return false;
     if (isDiv && !hasLink) return false;
     if (isDiv) {
       var r = el.getBoundingClientRect();
-      if (
-        r.width > 0 &&
-        r.height > 0 &&
-        r.width * r.height > window.innerWidth * window.innerHeight * 0.75
-      ) {
+      if (r.width > 0 && r.height > 0 && r.width * r.height > window.innerWidth * window.innerHeight * 0.75) {
         return false;
       }
     }
@@ -3786,6 +3534,10 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     return out;
   }
 
+  // New IG layouts (2026) render posts as plain divs — no <article>, no
+  // role="presentation", no <header>. Detect them from their media element
+  // and climb to the smallest ancestor carrying post links + timestamp +
+  // action bar (comments / like / share controls).
   function qualifiesAsPost(el) {
     if (!el || el.nodeType !== 1) return false;
     var tag = el.tagName;
@@ -3837,7 +3589,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           if ($f.height() > 0 && $f.width() > 0) injectPostBar($f);
         }
       } catch (e) {
-
+        /* never let one media element break the scan */
       }
     });
   }
@@ -3870,20 +3622,22 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
 
   function injectPostBar($post) {
     if (!$post || !$post.length) return;
-    if ($post.attr("data-snig") || $post.hasClass("x1iyjqo2")) return;
+    if ($post.attr("data-snig")) return;
     if ($post.parents("div#scrollview").length) return;
     if ($post.find(".ignis-bar, .ignis-rd").length) return;
     var $target = findMediaHost($post);
     if (!$target.length || $target.width() === 0) return;
-    var username = getPostUsername($post) || "";
-    $post.attr("data-snig", "canDownload").attr("data-username", username);
-    $target.css("position", "relative");
+    $post.attr("data-snig", "canDownload");
+    positionHost($target[0]);
     var bar = $('<div class="ignis-bar">');
     bar.append(
       makeButton(SVG.DOWNLOAD, "Download", "ignis-dl"),
       makeButton(SVG.NEW_TAB, "Open in new tab", "ignis-nt")
     );
-    if ($post.find(resourceCountSelector).length > 1) {
+    if (
+      $post.find("ul li").filter((_, n) => n.querySelector("img,video")).length > 1 ||
+      $post.find(resourceCountSelector).length > 1
+    ) {
       bar.append(makeButton(SVG.DOWNLOAD_ALL, "Download all", "ignis-da"));
     }
     $target.append(bar);
@@ -3896,7 +3650,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   }
 
   function scanPosts() {
-
+    // intrinsic self-heal: re-inject bars that Instagram re-rendered away
     document.querySelectorAll('[data-snig="canDownload"]').forEach(function (el) {
       if (!el.querySelector(".ignis-bar")) el.removeAttribute("data-snig");
     });
@@ -3907,24 +3661,22 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     scanMediaContainers();
   }
 
+  // Grid thumbnails: explore / profile / saved / tagged / related / DM embeds
   function scanGrids() {
-    document
-      .querySelectorAll('a[href^="/p/"], a[href^="/reel/"], a[href*="/p/"], a[href*="/reel/"]')
-      .forEach(function (a) {
+    document.querySelectorAll("a > .ignis-gd").forEach((btn) => {
+      if (!postCode(btn.parentElement.href)) btn.remove();
+    });
+    document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"],a[href*="/reels/"]').forEach(function (a) {
       try {
-        if (a.dataset.igGrid) return;
+        if (a.querySelector(":scope > .ignis-gd")) return;
         if (a.closest("article, header, nav, .ignis-bar, .ignis-modal, div[aria-busy][tabindex]")) return;
         var media = a.querySelector("img, video");
         if (!media) return;
         var r = media.getBoundingClientRect();
         if (r.width < 200 || r.height < 150) return;
-        var href = a.getAttribute("href") || "";
-        var hrefParts = href.split("/").filter(Boolean);
-        var scIdx = hrefParts.indexOf("p");
-        if (scIdx === -1) scIdx = hrefParts.indexOf("reel");
-        if (scIdx === -1 || !hrefParts[scIdx + 1]) return;
-        a.dataset.igGrid = "1";
+        if (!postCode(a.href)) return;
         var btn = document.createElement("button");
+        btn.type = "button";
         btn.className = "ignis-gd";
         btn.title = "Download this post";
         btn.setAttribute("aria-label", "Download this post");
@@ -3932,16 +3684,13 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         btn.addEventListener("click", function (e) {
           e.preventDefault();
           e.stopPropagation();
-          var parts = href.split("/").filter(Boolean);
-          var idx = parts.indexOf("p");
-          if (idx === -1) idx = parts.indexOf("reel");
-          var sc = idx > -1 ? parts[idx + 1] : null;
+          var sc = postCode(a.href);
           if (sc) openPostDialog(sc, { anchor: a });
         });
-        if (getComputedStyle(a).position === "static") a.style.position = "relative";
+        positionHost(a);
         a.appendChild(btn);
       } catch (e) {
-
+        /* never let one anchor break the scan */
       }
     });
   }
@@ -3949,42 +3698,32 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   function getPostContextFromButton(target) {
     var $article = $(target).closest('[data-snig="canDownload"], article, div[data-snig]');
     if (!$article.length) return { $article: $(), postPath: null };
-    var candidates = [];
-    function pushHref(h) {
-      if (h && h.trim()) candidates.push(h.trim());
-    }
-    pushHref($article.find('a[href^="/p/"]').first().attr("href"));
-    pushHref($article.find('a[href^="/reel/"]').first().attr("href"));
-    $article.find('a[role="link"][href], a[href]').each(function () {
-      var h = $(this).attr("href") || "";
-      if (h.indexOf("/p/") > -1 || h.indexOf("/reel/") > -1 || /^\/[^/]+\/(p|reel)\//i.test(h)) {
-        pushHref(h);
-        return false;
-      }
-    });
-    var postPath = null;
-    for (var i = 0; i < candidates.length && !postPath; i++) {
-      var parts = candidates[i].split("/").filter(Boolean);
-      var idx = parts.indexOf("p");
-      if (idx === -1) idx = parts.indexOf("reel");
-      if (idx > -1 && parts[idx + 1]) postPath = parts[idx + 1];
-    }
-    if (!postPath) {
-      var pp = location.pathname.split("/").filter(Boolean);
-      if (pp[0] === "p" || pp[0] === "reel") postPath = pp[1];
-    }
+    const links = Array.from($article[0].querySelectorAll("a[href]"));
+    const timeLink = $article[0].querySelector("time[datetime]")?.closest("a[href]");
+    const postPath =
+      postCode(timeLink?.href) || links.map((a) => postCode(a.href)).find(Boolean) || postCode(location.href);
     return { $article: $article, postPath: postPath };
   }
 
   async function resolvePostShortcode(shortcode, ctx) {
+    const href = location.href;
     try {
-      return await loadPostItems(shortcode, ctx);
+      const loaded = await loadPostItems(shortcode, ctx);
+      const host = ctx?.post || ctx?.anchor;
+      if (
+        host &&
+        (!host.isConnected ||
+          (host.matches('[data-snig="canDownload"]') && getPostContextFromButton(host).postPath !== shortcode))
+      )
+        return null;
+      return location.href === href ? loaded : null;
     } catch (e) {
       Toasts.error("Could not load post: " + ((e && e.message) || "network error"));
       return null;
     }
   }
 
+  // ─── Story flows ───────────────────────────────────────────────────────
   function getStoryProgress(username) {
     var $hdr = null;
     $('body > div section:visible a[href^="/' + esc(username) + '"]').each(function () {
@@ -4011,7 +3750,10 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   function setStoryProgressIndexText($element, className, username) {
     var $segs = getStoryProgress(username);
     var total = $segs.length;
-    if (total < 2) return;
+    if (total < 2) {
+      $element.find("." + className).remove();
+      return;
+    }
     var current = 0;
     $segs.each(function (i) {
       if ($(this).children().length > 0) current = i + 1;
@@ -4024,48 +3766,21 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       $counter = $('<div class="' + className + ' ignis-sb-pos">');
       $target.append($counter);
     }
-    $counter.text(current + "/" + total).attr("title", "Item " + current + " of " + total);
-  }
-
-  function resolveStoryMediaIdByTimestamp(payload) {
-    var items = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0] && payload.data.reels_media[0].items;
-    if (!items || !items.length) return null;
-    var $time = $('body > div section:visible time[datetime]')
-      .filter(function () {
-        return (
-          $(this).is(":visible") &&
-          $(this).parents('a[href^="/stories/highlights/"]').length === 0 &&
-          $(this).parents('[role="button"]').length === 0
-        );
-      })
-      .first();
-    if (!$time.length) return null;
-    var visibleTs = Math.floor(new Date($time.attr("datetime")).getTime() / 1000);
-    if (!isFinite(visibleTs) || !visibleTs) return null;
-    var bestId = null;
-    var minDiff = Infinity;
-    items.forEach(function (item) {
-      var d = Math.abs((item.taken_at_timestamp || 0) - visibleTs);
-      if (d < minDiff) {
-        minDiff = d;
-        bestId = item.pk || item.id;
-      }
-    });
-    return bestId;
+    if ($counter.text() !== current + "/" + total)
+      $counter.text(current + "/" + total).attr("title", "Item " + current + " of " + total);
   }
 
   function urlStoryId() {
-    var parts = location.pathname.split("/").filter(Boolean);
-    for (var i = parts.length - 1; i >= 0; i--) {
-      if (/^\d{5,}$/.test(parts[i])) return parts[i];
-    }
-    return null;
+    const [, name, id] = location.pathname.split("/").filter(Boolean);
+    return name && name !== "highlights" && /^\d+$/.test(id || "") ? id : null;
   }
 
   async function loadStoryPayload(username, type) {
     var cacheKey = type === "highlights" ? "highlights" : "stories";
     var cacheId = type === "highlights" ? location.pathname.split("/").filter(Boolean).pop() : username;
-    if (state.GL_dataCache[cacheKey][cacheId]) return state.GL_dataCache[cacheKey][cacheId];
+    const cached = state.GL_dataCache[cacheKey][cacheId];
+    if (cached && Date.now() - cached.ts < POST_CACHE_MAX_AGE) return cached.value;
+    const route = location.href;
     var payload;
     if (type === "highlights") {
       payload = await getHighlightStories(cacheId);
@@ -4075,48 +3790,22 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       if (!uid) throw new Error("Cannot resolve user id");
       payload = await getStories(uid, username);
     }
-    state.GL_dataCache[cacheKey][cacheId] = payload;
+    if (route !== location.href) throw new Error("The active page changed");
+    state.GL_dataCache[cacheKey][cacheId] = { value: payload, ts: Date.now() };
     return payload;
   }
 
-  async function resolveStoryTarget(payload, urlId) {
-    var reel = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0];
-    if (!reel) return null;
-    var items = normalizeReelItems(reel.items);
-    if (!items.length) return null;
-    var target = null;
-    if (urlId) {
-      items.forEach(function (it) {
-        if (it.id === urlId) target = it;
-      });
-    }
-    if (!target) {
-      var byTs = resolveStoryMediaIdByTimestamp(payload);
-      if (byTs) {
-        items.forEach(function (it) {
-          if (it.id === byTs) target = it;
-        });
-      }
-    }
-    if (!target) {
-      var countA = $("body > div section._ac0a header._ac0k > ._ac3r ._ac3n ._ac3p[style]").length;
-      var countB = $("body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
-      var countC = 0;
-      var base = $("body > div div:not([hidden]) section:visible > div div[style]:not([class]) > div")[0];
-      if (base) {
-        countC = $(base).find("div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
-      }
-      var nowIndex = countA || countB || countC;
-      if (nowIndex > 0 && nowIndex <= items.length) {
-        target = items[nowIndex - 1];
-      }
-    }
-    if (!target) target = items[0];
-    return { items: items, target: target };
+  function resolveStoryTarget(payload, urlId) {
+    const raw = resolveRawStoryItem(payload, urlId);
+    const target = raw && normalizeItem(raw, payload.data.reels_media[0].items.indexOf(raw));
+    return target ? { target } : null;
   }
 
   function getStoryScopeUsername(type) {
-    var username = type === "highlights" ? getHighlightsStoryUsername() : getStoryUsername();
+    var username =
+      type === "highlights"
+        ? getHighlightsStoryUsername()
+        : cleanName(location.pathname.split("/")[2]) || getStoryUsername();
     if (!username) {
       var parts = location.pathname.split("/").filter(Boolean);
       if (parts[0] === "stories" && parts[1] && parts[1] !== "highlights") username = parts[1];
@@ -4143,25 +3832,27 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       var d = new Date($time.attr("datetime")).getTime() / 1000;
       if (isFinite(d) && d > 0) ts = Math.floor(d);
     }
-    var hasVideo = $("body > div section:visible video[playsinline]").length > 0;
-    if (!hasVideo && username) {
-      var $img = $(
-        "body > div section:visible img[referrerpolicy][class], body > div section:visible img._aa63"
-      ).first();
-      var srcset = parseSrcset($img.attr("srcset") || "");
-      var url = (srcset.length ? srcset[srcset.length - 1].url : null) || $img.attr("src") || "";
-      if (/^https?:/i.test(url)) {
-        var imgMeta = {
-          username: username,
-          sourceType: type,
-          timestamp: ts,
-          shortcode: urlStoryId() || "",
-          filetype: "jpg",
-        };
-        if (isPreview) openNewTab(replaceSameOriginHost(url));
-        else await saveFiles(url, imgMeta);
-        return;
-      }
+    const route = location.href,
+      activeSection = findStoryContainer();
+    const video = activeSection.find("video").get(0);
+    const img = activeSection
+      .find("img")
+      .toArray()
+      .filter((n) => !n.closest("header,nav,a[href]") && n.getBoundingClientRect().width >= 150)
+      .sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0];
+    const direct = video
+      ? trustedURL(video.currentSrc || video.src || video.querySelector("source[src]")?.src)
+      : domImage(img);
+    if (
+      direct &&
+      (!video || !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA || (isPreview && !USER_SETTING.NEW_TAB_HIGHEST_VIDEO))
+    ) {
+      const meta = { username: username || "NONE", sourceType: type, timestamp: ts, shortcode: urlStoryId() || "" };
+      return downloadResource(
+        { url: direct, isVideo: !!video, ext: mediaExtension(direct, video ? "mp4" : "jpg"), thumb: video?.poster },
+        meta,
+        { preview: isPreview }
+      );
     }
     var payload;
     try {
@@ -4177,7 +3868,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
     var t = await resolveStoryTarget(payload, urlStoryId());
     if (!t) {
-      Toasts.error("No stories found for this account.");
+      Toasts.error("Cannot identify the active item. Use Browse to choose one.");
       return;
     }
     var item = t.target;
@@ -4186,24 +3877,30 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       sourceType: type,
       timestamp: item.takenAt || ts,
       shortcode: item.id,
-      caption: item.caption || null,
+      caption: item.caption || null
     };
-    if (USER_SETTING.FORCE_RESOURCE_VIA_MEDIA && USER_SETTING.PREFER_DASH_MANIFEST && item.id) {
+    if (
+      item.isVideo &&
+      !item.dash &&
+      USER_SETTING.FORCE_RESOURCE_VIA_MEDIA &&
+      USER_SETTING.PREFER_DASH_MANIFEST &&
+      item.id &&
+      (!isPreview || USER_SETTING.NEW_TAB_HIGHEST_VIDEO)
+    ) {
       try {
-        var mi = await getMediaInfo(item.id);
-        if (mi && mi.status === "ok" && mi.items && mi.items[0]) {
-          var mediaItem = mi.items[0];
-          var dashOk = await tryDashDownload(mediaItem, meta, isPreview);
-          if (dashOk) return;
-        }
+        const mi = await getMediaInfo(item.id);
+        const offered = mi.items?.find((v) =>
+          [v?.id, v?.pk].some((id) => id != null && String(id).split("_")[0] === item.id.split("_")[0])
+        );
+        if (offered?.video_dash_manifest) item.dash = offered;
       } catch (e) {
-        if (!USER_SETTING.FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED) {
-          Toasts.error("Media API failed: " + ((e && e.message) || "network error"));
+        if ((e.stopLookup && e.status !== 429) || !USER_SETTING.FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED) {
+          Toasts.error(e.message);
+          return;
         }
       }
     }
-    if (isPreview) openNewTab(replaceSameOriginHost(item.url));
-    else await saveFiles(item.url, Object.assign({}, meta, { filetype: item.ext || "mp4", thumbnailURL: item.thumb }));
+    if (location.href === route) return downloadResource(item, meta, { preview: isPreview });
   }
 
   async function downloadStoryThumbnail(type) {
@@ -4260,9 +3957,11 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         shortcode: (reel && reel.id) || "",
         sourceType: type,
         timestamp: Math.floor(Date.now() / 1000),
-        caption: null,
+        caption: null
       };
-      await batchDownload(items, meta);
+      const route = location.href,
+        batch = await batchDownload(items, meta);
+      if (!batch || batch.skipped || location.href !== route) return;
       if (type === "stories" && USER_SETTING.DOWNLOAD_STORY_HIGHLIGHTS) {
         try {
           var userInfo = await getUserId(owner);
@@ -4270,7 +3969,9 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           if (uid) {
             var tray = await getUserHighlights(uid);
             for (var i = 0; i < tray.length; i++) {
+              if (route !== location.href) return;
               var hl = await getHighlightStories(tray[i].id);
+              if (route !== location.href) return;
               var hReel = hl.data && hl.data.reels_media && hl.data.reels_media[0];
               var hItems = normalizeReelItems(hReel ? hReel.items : []);
               if (hItems.length) {
@@ -4279,13 +3980,13 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
                   shortcode: (hReel && hReel.id) || "",
                   sourceType: "highlights",
                   timestamp: Math.floor(Date.now() / 1000),
-                  caption: null,
+                  caption: null
                 });
               }
             }
           }
         } catch (e) {
-          logger("highlights batch failed:", e && e.message ? e.message : e);
+          Toasts.error("Highlights batch stopped: " + e.message);
         }
       }
     } catch (e) {
@@ -4293,22 +3994,25 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
   }
 
-  function resolveRawStoryItem(payload) {
+  // ─── Story item resolution & tagged profiles ───────────────────────────
+  function resolveRawStoryItem(payload, urlId = urlStoryId()) {
     var reel = payload && payload.data && payload.data.reels_media && payload.data.reels_media[0];
-    var items = (reel && reel.items) || [];
+    var items = Array.isArray(reel?.items) ? reel.items.filter(Boolean) : [];
     if (!items.length) return null;
 
-    var urlId = urlStoryId();
     if (urlId) {
       for (var i = 0; i < items.length; i++) {
-        var ids = [items[i].id, items[i].pk].filter(function (id) {
-          return id != null;
-        }).map(String);
+        var ids = [items[i].id, items[i].pk]
+          .filter(function (id) {
+            return id != null;
+          })
+          .map(String);
         var baseIds = ids.map(function (id) {
           return id.split("_")[0];
         });
         if (ids.indexOf(String(urlId)) > -1 || baseIds.indexOf(String(urlId)) > -1) return items[i];
       }
+      return null; // An explicit ID must not silently select somebody else’s item.
     }
 
     var $time = $("body > div section:visible time[datetime]")
@@ -4337,19 +4041,25 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
 
     var countA = $("body > div section._ac0a header._ac0k > ._ac3r ._ac3n ._ac3p[style]").length;
-    var countB = $("body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6").length;
+    var countB = $(
+      "body > div section:visible > div > div:not([class]) > div > div div.x1ned7t2.x78zum5 div.x1caxmr6"
+    ).length;
     var nowIndex = countA || countB;
     if (nowIndex > 0 && nowIndex <= items.length) return items[nowIndex - 1];
-    return items[0];
+    return items.length === 1 ? items[0] : null;
   }
 
   function extractTaggedProfiles(item, excludeUsername) {
     var profiles = new Map();
     var stickers = item && Array.isArray(item.story_bloks_stickers) ? item.story_bloks_stickers : [];
     stickers.forEach(function (sticker) {
-      var username = sticker && sticker.bloks_sticker && sticker.bloks_sticker.sticker_data &&
-        sticker.bloks_sticker.sticker_data.ig_mention && sticker.bloks_sticker.sticker_data.ig_mention.username;
-      if (typeof username !== "string" || !username) return;
+      var username =
+        sticker &&
+        sticker.bloks_sticker &&
+        sticker.bloks_sticker.sticker_data &&
+        sticker.bloks_sticker.sticker_data.ig_mention &&
+        sticker.bloks_sticker.sticker_data.ig_mention.username;
+      if (!cleanName(username)) return;
       if (excludeUsername && username.toLowerCase() === excludeUsername.toLowerCase()) return;
       var key = username.toLowerCase();
       if (!profiles.has(key)) profiles.set(key, username);
@@ -4426,7 +4136,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     var $button = $(
       'div[id^="mount"] section:last-child > div > div:not([class]) div:last-child > div[role="button"]'
     ).filter(function () {
-      return $(this).children().length === 0 && this.textContent.trim() !== "";
+      return $(this).children().length === 0 && /^view story$/i.test(this.textContent.trim());
     });
     if ($button.length) {
       $button.first().trigger("click");
@@ -4452,13 +4162,14 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       if (!$dialog.is(":visible")) return;
       var $headers = $dialog.find("h2");
       if (!$headers.length) return;
-      var isSharedHeader = $headers.filter(function () {
-        var text = (this.textContent || "").trim().toLowerCase();
-        if (!text) return false;
-        if (text.indexOf("shared this with you") > -1) return true;
-        if (text.indexOf("shared with you") > -1) return true;
-        return !!(profileUsername && text.indexOf(profileUsername) > -1 && text.indexOf("shared") > -1);
-      }).length > 0;
+      var isSharedHeader =
+        $headers.filter(function () {
+          var text = (this.textContent || "").trim().toLowerCase();
+          if (!text) return false;
+          if (text.indexOf("shared this with you") > -1) return true;
+          if (text.indexOf("shared with you") > -1) return true;
+          return !!(profileUsername && text.indexOf(profileUsername) > -1 && text.indexOf("shared") > -1);
+        }).length > 0;
       if (!isSharedHeader) return;
 
       var $buttons = $dialog.find('div[role="button"]');
@@ -4470,7 +4181,6 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           return false;
         }
       });
-      if ((!$notNow || !$notNow.length) && $buttons.length === 2) $notNow = $buttons.last();
       if ($notNow && $notNow.length) $notNow.trigger("click");
     });
   }
@@ -4478,17 +4188,21 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   function maybeSkipSharedDialog() {
     if (!USER_SETTING.SKIP_SHARED_WITH_YOU_DIALOG || !window.location.search.includes("igsh")) return;
     var tries = 0;
-    var timer = setInterval(function () {
+    var timer = (state.sharedDialogTimer = setInterval(function () {
       if (!window.location.search.includes("igsh") || ++tries > 20) {
         clearInterval(timer);
         return;
       }
       skipSharedWithYouDialog();
-    }, 200);
+    }, 200));
   }
 
+  // ─── Story controls ────────────────────────────────────────────────────
   function ensureStoryTools($host) {
-    if (getComputedStyle($host[0]).position === "static") $host.css("position", "relative");
+    positionHost($host[0]);
+    $(".ignis-storytools")
+      .filter((_, el) => el.parentElement !== $host[0])
+      .remove();
     var $bar = $host.children(".ignis-storytools").first();
     if (!$bar.length) {
       $bar = $('<div class="ignis-storytools">');
@@ -4499,7 +4213,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
 
   function attachStoryButtons() {
     var $element = findStoryContainer();
-    if (!$element) return;
+    if (!$element?.length) return;
     var $bar = ensureStoryTools($element);
     var username = getStoryUsername() || "";
     if (!$bar.find(".ignis-sd").length) {
@@ -4522,7 +4236,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
 
   function attachHighlightButtons() {
     var $element = findStoryContainer();
-    if (!$element) return;
+    if (!$element?.length) return;
     var $bar = ensureStoryTools($element);
     var username = getHighlightsStoryUsername() || "";
     if (!$bar.find(".ignis-hd").length) {
@@ -4570,20 +4284,19 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   function scanStoryPage() {
     attachStoryButtons();
     skipStoryConfirm();
-    var $host = $(".ignis-sd").first().closest(".ignis-storytools").parent();
-    if ($host.find("video").length) attachStoryThumbnailButton();
+    attachStoryThumbnailButton();
   }
 
   function scanHighlightPage() {
     attachHighlightButtons();
     skipStoryConfirm();
-    var $host = $(".ignis-hd").first().closest(".ignis-storytools").parent();
-    if ($host.find("video").length) attachHighlightThumbnailButton();
+    attachHighlightThumbnailButton();
   }
 
+  // ─── Reels ─────────────────────────────────────────────────────────────
   function attachReelBar($main) {
     if (!$main || !$main.length || $main.find(".ignis-rd, .ignis-bar").length) return;
-    $main.css("position", "relative");
+    positionHost($main[0]);
     $main.append(
       makeButton(SVG.DOWNLOAD, "Download reel", "ignis-rd").css({ right: "40px", top: "15px" }),
       makeButton(SVG.NEW_TAB, "Open reel in new tab", "ignis-rn").css({ right: "40px", top: "51px" })
@@ -4591,36 +4304,54 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   }
 
   function onReelsPage() {
-    $("div[aria-busy][tabindex]").children("div").each(function () {
-      var $c = $(this);
-      if (
-        $c.children().length &&
-        $c.width() > window.innerWidth * 0.8 &&
-        $c.height() > window.innerHeight * 0.8 &&
-        $c.find("video").length
-      ) {
-        attachReelBar($c);
+    for (const video of document.querySelectorAll("main video,div[aria-busy][tabindex] video")) {
+      if (video.closest(".ignis-modal")) continue;
+      const rect = video.getBoundingClientRect();
+      if (rect.width < 140 || rect.height < 120) continue;
+      let host = video.parentElement;
+      for (let el = host; el && !el.matches("main, body"); el = el.parentElement) {
+        if (el.querySelectorAll("video").length !== 1) break;
+        if (Array.from(el.querySelectorAll("a[href]")).some((a) => postCode(a.href))) {
+          host = el;
+          break;
+        }
       }
-    });
+      if (host) attachReelBar($(host));
+    }
   }
 
-  async function downloadCurrentReel(isPreview) {
-    var path = location.pathname.split("/").filter(Boolean);
-    var shortcode = null;
-    if (path[0] === "reels" && path[1]) shortcode = path[1];
-    if (!shortcode) {
-      Toasts.error("Cannot resolve reel id.");
+  async function downloadCurrentReel(isPreview, button) {
+    const host = button.parentElement,
+      route = location.href;
+    const code =
+      Array.from(host.querySelectorAll("a[href]"))
+        .map((a) => postCode(a.href))
+        .find(Boolean) || postCode(route);
+    const video = host.querySelector("video"),
+      direct = trustedURL(video?.currentSrc || video?.src || video?.querySelector("source[src]")?.src);
+    if (
+      direct &&
+      (!code || !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA || (isPreview && !USER_SETTING.NEW_TAB_HIGHEST_VIDEO))
+    )
+      return downloadResource(
+        { isVideo: true, url: direct, thumb: trustedURL(video.poster), ext: mediaExtension(direct, "mp4") },
+        { sourceType: "reels", shortcode: code || "", username: getPostUsername($(host)) || "NONE" },
+        { preview: isPreview }
+      );
+    if (!code) {
+      Toasts.info("No downloadable reel is visible.");
       return;
     }
-    var loaded = await resolvePostShortcode(shortcode);
-    if (!loaded) return;
-    var meta = Object.assign({}, loaded.meta, { sourceType: "reels", caption: null });
-    var item = loaded.items[0];
-    if (!item) return;
-    if (isPreview) openNewTab(replaceSameOriginHost(item.url));
-    else await downloadResource(item, meta, {});
+    const loaded = await resolvePostShortcode(code, { post: host, complete: true });
+    if (loaded && location.href === route && host.isConnected) {
+      const videoItem = loaded.items.find((i) => i.isVideo);
+      if (videoItem)
+        await downloadResource(videoItem, { ...loaded.meta, sourceType: "reels" }, { preview: isPreview });
+      else Toasts.info("No downloadable reel is visible.");
+    }
   }
 
+  // ─── Profile avatar ────────────────────────────────────────────────────
   function attachAvatarButton() {
     if ($(".ignis-pd").length) return;
     var $img = $("header > *[class]:first-child > *[class]:first-child img[alt]").first();
@@ -4629,7 +4360,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     var $mount = $img.is("[draggable]") ? $img.parent().parent() : $img.parent().parent().parent();
     if (!$mount.length) $mount = $img.parent().parent();
     if (!$mount.length) return;
-    $mount.css("position", "relative");
+    positionHost($mount[0]);
     if ($mount.find(".ignis-pd").length) return;
     $mount.append(makeButton(SVG.DOWNLOAD, "Download profile picture", "ignis-pd"));
   }
@@ -4645,8 +4376,14 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       return;
     }
     try {
-      var userInfo = await getUserId(username);
-      var uid = (userInfo.user && (userInfo.user.pk || userInfo.user.id)) || null;
+      const route = location.href;
+      let userInfo = null;
+      if (USER_SETTING.DOWNLOAD_PROFILE_PIC_HD) {
+        try {
+          userInfo = await getUserId(username);
+        } catch (_) {}
+      }
+      var uid = userInfo?.user?.pk || userInfo?.user?.id || null;
       var url = null;
       if (USER_SETTING.DOWNLOAD_PROFILE_PIC_HD && uid) {
         try {
@@ -4683,28 +4420,33 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         url = userInfo.user._hdUrl;
       }
       if (!url) {
-        url = (userInfo && userInfo.user && (userInfo.user.profile_pic_url || userInfo.user.profile_pic_url_hd)) ||
+        url =
+          (userInfo && userInfo.user && (userInfo.user.profile_pic_url || userInfo.user.profile_pic_url_hd)) ||
           $("header img[alt]").first().attr("src");
       }
       if (!url) {
         Toasts.error("Cannot find profile picture URL.");
         return;
       }
+      if (location.href !== route) return;
       await saveFiles(url, {
         username: username,
         sourceType: "avatar",
         timestamp: Math.floor(Date.now() / 1000),
         shortcode: username,
         filetype: "jpg",
-        uid: uid,
+        uid: uid
       });
     } catch (e) {
       Toasts.error("Could not download profile picture: " + ((e && e.message) || "network error"));
     }
   }
 
+  // ─── Scan dispatcher ───────────────────────────────────────────────────
   function storyTick() {
-
+    // Lightweight per-tick work for story/highlight routes: the progress bar
+    // advances via style/width changes (no childList mutations), so a cheap
+    // targeted refresh replaces the old full scanAll interval.
     var isHl = state.route === "highlights";
     var btnSel = isHl ? ".ignis-hd" : ".ignis-sd";
     if (!$(btnSel).length) {
@@ -4757,8 +4499,10 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     scanScheduled = true;
     setTimeout(function () {
       scanScheduled = false;
-
-      if (state.firstStarted && (!state.pageLoaded || location.href !== state.currentURL)) {
+      // The observer doubles as the navigation safety net: any DOM churn on
+      // an unclassified/blacklisted page re-runs the router, so no periodic
+      // watchdog is needed.
+      if (state.firstStarted && ((!state.pageLoaded && !state.blocked) || location.href !== state.currentURL)) {
         Router.enter();
         return;
       }
@@ -4770,25 +4514,57 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   let domObserverRoot = null;
   function installDomObserver() {
     if (domObserver) domObserver.disconnect();
-    var mount = document.querySelector('div[id^="mount"]') || document.body;
+    var mount = document.documentElement;
     domObserverRoot = mount;
     domObserver = new MutationObserver(function (muts) {
-
-      for (var i = 0; i < muts.length; i++) {
-        if (muts[i].addedNodes && muts[i].addedNodes.length) {
-          scheduleScan();
-          return;
-        }
-      }
+      if ($body[0] !== document.body && document.body) $body = $(document.body);
+      const own =
+        ".ignis-modal,.ignis-bar,.ignis-storytools,.ignis-progress,.ignis-toasts,.ignis-palette,.ignis-ksh,.ignis-rd,.ignis-rn,.ignis-pd,.ignis-gd";
+      if (
+        location.href !== state.currentURL ||
+        muts.some(
+          (m) =>
+            !m.target.closest?.(own) &&
+            ((m.type === "attributes" && m.target.matches("a[href],#splash-screen")) ||
+              Array.from(m.addedNodes).some((n) => n.nodeType === 1 && !n.matches(own)) ||
+              Array.from(m.removedNodes).some(
+                (n) => n.nodeType === 1 && (n.id === "splash-screen" || n.matches(".ignis-bar,.ignis-gd"))
+              ) ||
+              (!state.pageLoaded && !state.blocked && m.target.id === "splash-screen"))
+        )
+      )
+        scheduleScan();
     });
-    domObserver.observe(mount, { childList: true, subtree: true });
+    domObserver.observe(mount, { childList: true, subtree: true, attributes: true, attributeFilter: ["href"] });
+    const splash = document.getElementById("splash-screen");
+    if (splash)
+      domObserver.observe(splash, {
+        attributes: true,
+        attributeFilter: ["style", "class", "hidden"],
+        childList: true,
+        subtree: true
+      });
+  }
+
+  // ─── Delegated click handlers ──────────────────────────────────────────
+  function selectedPostItem(loaded, index) {
+    const item = loaded.items.find((it) => it._igSourceIndex === index + 1);
+    if (!item) Toasts.info("Could not identify this slide. Open the post dialog to choose an item.");
+    return item;
+  }
+  async function downloadPostBatch(ctx) {
+    const post = ctx.$article[0],
+      loaded = await resolvePostShortcode(ctx.postPath, { post, complete: true });
+    if (!loaded) return;
+    if (loaded.fromDom) return openPostDialog(ctx.postPath, { post, initial: loaded });
+    return batchDownload(loaded.items, loaded.meta);
   }
 
   function registerBodyHandlers() {
     if (state.bodyEventsRegistered) return;
     state.bodyEventsRegistered = true;
 
-    $body.on("click.ignisEvents", ".ignis-dl", function () {
+    $(document).on("click.ignisEvents", ".ignis-dl", function () {
       var ctx = getPostContextFromButton(this);
       if (!ctx.postPath) {
         Toasts.error("Cannot find the post link.");
@@ -4796,16 +4572,14 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       }
       var postEl = ctx.$article[0] || null;
       if (USER_SETTING.DIRECT_DOWNLOAD_ALL) {
-        resolvePostShortcode(ctx.postPath, { post: postEl }).then(function (loaded) {
-          if (loaded) batchDownload(loaded.items, loaded.meta);
-        });
+        downloadPostBatch(ctx);
         return;
       }
       if (USER_SETTING.DIRECT_DOWNLOAD_VISIBLE_RESOURCE) {
         var index = getVisibleNodeIndex(ctx.$article);
-        resolvePostShortcode(ctx.postPath, { post: postEl }).then(function (loaded) {
+        resolvePostShortcode(ctx.postPath, { post: postEl, complete: true }).then(function (loaded) {
           if (!loaded) return;
-          var item = loaded.items[index] || loaded.items[0];
+          var item = selectedPostItem(loaded, index);
           if (item) downloadResource(item, loaded.meta, {});
         });
         return;
@@ -4813,101 +4587,109 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       openPostDialog(ctx.postPath, { post: postEl });
     });
 
-    $body.on("click.ignisEvents", ".ignis-da", function () {
+    $(document).on("click.ignisEvents", ".ignis-da", function () {
       var ctx = getPostContextFromButton(this);
       if (!ctx.postPath) {
         Toasts.error("Cannot find the post link.");
         return;
       }
-      resolvePostShortcode(ctx.postPath, { post: ctx.$article[0] || null }).then(function (loaded) {
-        if (loaded) batchDownload(loaded.items, loaded.meta);
-      });
+      downloadPostBatch(ctx);
     });
 
-    $body.on("click.ignisEvents", ".ignis-nt", function () {
+    $(document).on("click.ignisEvents", ".ignis-nt", function () {
       var ctx = getPostContextFromButton(this);
       if (!ctx.postPath) {
         Toasts.error("Cannot find the post link.");
         return;
       }
       var index = getVisibleNodeIndex(ctx.$article);
-      resolvePostShortcode(ctx.postPath, { post: ctx.$article[0] || null }).then(function (loaded) {
+      resolvePostShortcode(ctx.postPath, { post: ctx.$article[0] || null, complete: true }).then(function (loaded) {
         if (!loaded) return;
-        var item = loaded.items[index] || loaded.items[0];
+        var item = selectedPostItem(loaded, index);
         if (item) downloadResource(item, loaded.meta, { preview: true });
       });
     });
 
-    $body.on("click.ignisEvents", ".ignis-th", function () {
+    $(document).on("click.ignisEvents", ".ignis-th", function () {
       var ctx = getPostContextFromButton(this);
       if (!ctx.postPath) {
         Toasts.error("Cannot find the post link.");
         return;
       }
       var index = getVisibleNodeIndex(ctx.$article);
-      resolvePostShortcode(ctx.postPath, { post: ctx.$article[0] || null }).then(function (loaded) {
+      resolvePostShortcode(ctx.postPath, { post: ctx.$article[0] || null, complete: true }).then(function (loaded) {
         if (!loaded) return;
-        var item = loaded.items[index] || loaded.items[0];
+        var item = selectedPostItem(loaded, index);
         if (item && item.thumb) {
-          saveFiles(item.thumb, Object.assign({}, loaded.meta, { sourceType: "thumbnail", filetype: "jpg" }));
+          saveFiles(
+            item.thumb,
+            Object.assign({}, loaded.meta, {
+              index: item._igSourceIndex,
+              timestamp: item.takenAt || loaded.meta.timestamp,
+              sourceType: "thumbnail",
+              filetype: "jpg"
+            })
+          );
         }
       });
     });
 
-    $body.on("click.ignisEvents", ".ignis-sd", function () {
+    $(document).on("click.ignisEvents", ".ignis-sd", function () {
       if (USER_SETTING.DIRECT_DOWNLOAD_STORY) downloadStoriesAll("stories");
       else downloadStoryCurrent("stories", false);
     });
-    $body.on("click.ignisEvents", ".ignis-sn", function () {
+    $(document).on("click.ignisEvents", ".ignis-sn", function () {
       downloadStoryCurrent("stories", true);
     });
-    $body.on("click.ignisEvents", ".ignis-sa", function () {
+    $(document).on("click.ignisEvents", ".ignis-sa", function () {
       downloadStoriesAll("stories");
     });
-    $body.on("click.ignisEvents", ".ignis-st", function () {
+    $(document).on("click.ignisEvents", ".ignis-st", function () {
       downloadStoryThumbnail("stories");
     });
 
-    $body.on("click.ignisEvents", ".ignis-hd", function () {
+    $(document).on("click.ignisEvents", ".ignis-hd", function () {
       if (USER_SETTING.DIRECT_DOWNLOAD_STORY) downloadStoriesAll("highlights");
       else downloadStoryCurrent("highlights", false);
     });
-    $body.on("click.ignisEvents", ".ignis-hn", function () {
+    $(document).on("click.ignisEvents", ".ignis-hn", function () {
       downloadStoryCurrent("highlights", true);
     });
-    $body.on("click.ignisEvents", ".ignis-ha", function () {
+    $(document).on("click.ignisEvents", ".ignis-ha", function () {
       downloadStoriesAll("highlights");
     });
-    $body.on("click.ignisEvents", ".ignis-ht", function () {
+    $(document).on("click.ignisEvents", ".ignis-ht", function () {
       downloadStoryThumbnail("highlights");
     });
-    $body.on("click.ignisEvents", ".ignis-tp", function () {
+    $(document).on("click.ignisEvents", ".ignis-tp", function () {
       showTaggedProfiles("stories");
     });
-    $body.on("click.ignisEvents", ".ignis-htp", function () {
+    $(document).on("click.ignisEvents", ".ignis-htp", function () {
       showTaggedProfiles("highlights");
     });
-    $body.on("click.ignisEvents", ".ignis-sl", function () {
+    $(document).on("click.ignisEvents", ".ignis-sl", function () {
       openStoryBrowser("stories");
     });
-    $body.on("click.ignisEvents", ".ignis-hl", function () {
+    $(document).on("click.ignisEvents", ".ignis-hl", function () {
       openStoryBrowser("highlights");
     });
 
-    $body.on("click.ignisEvents", ".ignis-rd", function () {
-      downloadCurrentReel(false);
+    $(document).on("click.ignisEvents", ".ignis-rd", function () {
+      downloadCurrentReel(false, this);
     });
-    $body.on("click.ignisEvents", ".ignis-rn", function () {
-      downloadCurrentReel(true);
+    $(document).on("click.ignisEvents", ".ignis-rn", function () {
+      downloadCurrentReel(true, this);
     });
 
-    $body.on("click.ignisEvents", ".ignis-pd", function () {
+    $(document).on("click.ignisEvents", ".ignis-pd", function () {
       downloadAvatar();
     });
   }
 
+  // ─── Router ────────────────────────────────────────────────────────────
   const Router = {
     enter: function () {
+      this.cleanup();
       state.firstStarted = true;
       state.currentURL = location.href;
       state.route = null;
@@ -4915,18 +4697,17 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       var path = location.pathname;
       var blacklist =
         /^\/(challenge\/?.*|qr\/?|accounts\/.*|emails\/.*|language\/?.*?|your_activity\/?.*|settings\/help(\/.*)?|auth_platform\/codeentry\/?.*|consent\/?.*)$/i;
-      if (
-        blacklist.test(path) ||
-        ($("div#splash-screen").length > 0 && !$("div#splash-screen").is(":hidden"))
-      ) {
+      state.blocked = blacklist.test(path);
+      if (state.blocked || ($("div#splash-screen").length > 0 && !$("div#splash-screen").is(":hidden"))) {
         state.pageLoaded = false;
+        if (!state.blocked) installDomObserver();
         return;
       }
-      if (path === "/" || path.startsWith("/explore")) {
-        state.route = "explore";
+      if (path === "/" || /^\/explore(?:\/|$)/.test(path)) {
+        state.route = path === "/" ? "home" : "explore";
       } else if (path.startsWith("/p/") || path.startsWith("/reel/") || /^\/([^/]+)\/(p|reel)\//.test(path)) {
         state.route = "post";
-      } else if (path.startsWith("/reels/")) {
+      } else if (/^\/reels(?:\/|$)/.test(path)) {
         state.route = "reels";
       } else if (path.startsWith("/stories/highlights/")) {
         state.route = "highlights";
@@ -4943,9 +4724,9 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         state.route = null;
       }
       state.pageLoaded = true;
-      this.cleanup();
       maybeSkipSharedDialog();
-
+      // Self-heal: Instagram occasionally swaps the mount node, which would
+      // silently orphan the observer. Re-arm it whenever the root died.
       if (!domObserver || !domObserverRoot || !domObserverRoot.isConnected) {
         installDomObserver();
       }
@@ -4955,14 +4736,16 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         logger("router scan error:", e && e.message ? e.message : e);
       }
       if (state.route === "home" || state.route === "explore" || state.route === "post") {
-
+        // Bounded backoff ladder instead of a 50ms×100 hot poll: the
+        // MutationObserver already covers late renders, these are just
+        // insurance scans while the first paint settles.
         var follow = [400, 1000, 2500];
         var fi = 0;
         function followScan() {
           try {
             scanAll();
           } catch (e) {
-
+            /* isolated */
           }
           if (fi < follow.length && !document.querySelector(".ignis-bar, .ignis-gd")) {
             state.postPoll = setTimeout(followScan, follow[fi++]);
@@ -4977,7 +4760,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           try {
             storyTick();
           } catch (e) {
-
+            /* isolated */
           }
         }, checkInterval);
       }
@@ -4988,25 +4771,32 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       clearTimeout(state.postPoll);
       state.postPoll = null;
       clearTimeout(state.homepageObserverDebounce);
+      clearInterval(state.sharedDialogTimer);
+      sharedIO?.disconnect();
+      sharedIO = null;
+      ioCallbacks = new WeakMap();
+      while (ModalStack.modals.length) ModalStack.pop();
+      $(document).off("keydown.igpal");
+      $(".ignis-bar,.ignis-storytools,.ignis-rd,.ignis-rn,.ignis-gd,.ignis-pd,.ignis-palette,.ignis-ksh").remove();
+      $("[data-snig=canDownload]").removeAttr("data-snig");
+      $(".ignis-position-host").removeClass("ignis-position-host");
       var now = Date.now();
       Object.keys(state.GL_payloadCache).forEach(function (k) {
         var c = state.GL_payloadCache[k];
         if (!c || now - c.ts > POST_CACHE_MAX_AGE) delete state.GL_payloadCache[k];
       });
-
+      // Story/highlight payloads are re-fetchable; keep them for the session
+      // (per-item swipes reuse them) but bound total retention.
       var dcCount =
-        Object.keys(state.GL_dataCache.stories).length +
-        Object.keys(state.GL_dataCache.highlights).length;
+        Object.keys(state.GL_dataCache.stories).length + Object.keys(state.GL_dataCache.highlights).length;
       if (dcCount > 30) {
-        state.GL_dataCache.stories = {};
-        state.GL_dataCache.highlights = {};
-      }
-      if (Object.keys(state.GL_mediaDataCache).length > 200) {
-        state.GL_mediaDataCache = {};
+        state.GL_dataCache.stories = Object.create(null);
+        state.GL_dataCache.highlights = Object.create(null);
       }
     },
     start: function () {
-
+      // Navigation events and the DOM observer work across manager sandboxes. Coalesce
+      // bursts (IG fires several mutations per route change) into one enter.
       var navTimer = null;
       __ignisOnNavigate = function () {
         if (navTimer) return;
@@ -5015,9 +4805,14 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           if (location.href !== state.currentURL) Router.enter();
         }, 60);
       };
-    },
+    }
   };
 
+  /* ============================================================
+     Ignis Boot — cache, keyboard, menu, startup
+     ============================================================ */
+
+  // ─── Persistent cache (IndexedDB, GM-storage fallback) ─────────────────
   function idbRequest(request) {
     return new Promise(function (resolve, reject) {
       request.onsuccess = function () {
@@ -5046,6 +4841,11 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   function openDB() {
     return new Promise(function (resolve, reject) {
       var request = indexedDB.open(PERSISTENT_CACHE_DB_NAME, PERSISTENT_CACHE_DB_VERSION);
+      let expired = false;
+      const timer = setTimeout(() => {
+        expired = true;
+        reject(new Error("Cache open timed out"));
+      }, 2000);
       request.onupgradeneeded = function () {
         var db = request.result;
         if (!db.objectStoreNames.contains(PERSISTENT_CACHE_STORE_NAME)) {
@@ -5053,7 +4853,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         }
       };
       request.onsuccess = function () {
+        clearTimeout(timer);
         var db = request.result;
+        if (expired) {
+          db.close();
+          return;
+        }
         var forget = function () {
           if (persistentCacheStore.db === db) persistentCacheStore.db = null;
         };
@@ -5065,9 +4870,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         resolve(db);
       };
       request.onerror = function () {
+        clearTimeout(timer);
         reject(request.error);
       };
       request.onblocked = function () {
+        clearTimeout(timer);
+        expired = true;
         reject(new Error("IndexedDB open blocked by another tab"));
       };
     });
@@ -5083,13 +4891,29 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     return Promise.resolve(persistentCacheStore.db);
   }
 
-  function mergeCacheEntries(stored, session) {
-    var isPlainObject = function (value) {
-      return !!value && typeof value === "object" && !Array.isArray(value);
-    };
-    if (!isPlainObject(stored)) return session;
-    if (!isPlainObject(session)) return stored;
-    return Object.assign({}, stored, session);
+  function mergeCacheEntries(key, ...sources) {
+    const result = Object.create(null),
+      now = Date.now();
+    for (const src of sources) {
+      if (!src || typeof src !== "object" || Array.isArray(src)) continue;
+      for (const [k, v] of Object.entries(src)) {
+        if (
+          key === IMAGE_CACHE_KEY &&
+          /^\d{1,30}$/.test(k) &&
+          trustedURL(v?.url) &&
+          Number.isFinite(v.ts) &&
+          v.ts <= now &&
+          now - v.ts < IMAGE_CACHE_MAX_AGE
+        )
+          result[k] = { url: v.url, ts: v.ts };
+        if (key === USER_ID_CACHE_KEY && cleanName(k) === k && /^\d{1,30}$/.test(String(v))) result[k] = String(v);
+      }
+    }
+    const keys = Object.keys(result),
+      limit = key === IMAGE_CACHE_KEY ? IMAGE_MAX_CACHE_ITEMS : USER_ID_MAX_CACHE_ITEMS;
+    if (key === IMAGE_CACHE_KEY) keys.sort((a, b) => result[a].ts - result[b].ts);
+    for (const k of keys.slice(0, Math.max(0, keys.length - limit))) delete result[k];
+    return result;
   }
 
   function initPersistentCache() {
@@ -5106,22 +4930,18 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           return getPersistentCacheDB();
         })
         .then(function (db) {
-          var readStore = db.transaction(PERSISTENT_CACHE_STORE_NAME, "readonly").objectStore(PERSISTENT_CACHE_STORE_NAME);
+          var readStore = db
+            .transaction(PERSISTENT_CACHE_STORE_NAME, "readonly")
+            .objectStore(PERSISTENT_CACHE_STORE_NAME);
           return Promise.all(
             keys.map(function (key) {
               return idbRequest(readStore.get(key));
             })
           ).then(function (records) {
             keys.forEach(function (key, i) {
-              if (records[i] !== undefined) {
-                stored[key] = records[i].value;
-                return;
-              }
-              var legacyValue = GM_getValue(key);
-              if (legacyValue !== undefined) {
-                stored[key] = legacyValue;
-                migrated.push(key);
-              }
+              const legacy = Store.get(key, undefined);
+              stored[key] = mergeCacheEntries(key, records[i]?.value, legacy);
+              if (legacy !== undefined) migrated.push(key);
             });
             if (!migrated.length) return null;
             var transaction = db.transaction(PERSISTENT_CACHE_STORE_NAME, "readwrite");
@@ -5130,14 +4950,8 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
             migrated.forEach(function (key) {
               writeStore.put({ id: key, value: stored[key], updatedAt: now });
             });
-            return idbTransactionDone(transaction).then(function () {
-              migrated.forEach(function (key) {
-                try {
-                  GM_deleteValue(key);
-                } catch (e) {
-                  GM_setValue(key, {});
-                }
-              });
+            return idbTransactionDone(transaction).then(async function () {
+              await Promise.all(migrated.map((key) => Store.remove(key)));
               logger("initPersistentCache()", "moved " + migrated.join(", ") + " from GM storage to IndexedDB");
             });
           });
@@ -5147,7 +4961,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           persistentCacheStore.backend = "gm";
           stored = {};
           keys.forEach(function (key) {
-            stored[key] = GM_getValue(key);
+            stored[key] = Store.get(key, undefined);
           });
         })
         .then(function () {
@@ -5156,7 +4970,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
             var field = PERSISTENT_CACHE_BINDINGS[key];
             var session = state[field];
             var hasSessionEntries = !!session && Object.keys(session).length > 0;
-            var merged = stored[key] === undefined ? session : mergeCacheEntries(stored[key], session);
+            var merged = mergeCacheEntries(key, stored[key], session);
             state[field] = merged || {};
             persistentCacheStore.values.set(key, state[field]);
             if (hasSessionEntries) persistentCacheStore.pending.add(key);
@@ -5195,7 +5009,10 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       clearTimeout(persistentCacheStore.flushTimer);
       persistentCacheStore.flushTimer = null;
     }
-    persistentCacheStore.flushChain = persistentCacheStore.flushChain.then(writePendingPersistentCache);
+    persistentCacheStore.flushChain = persistentCacheStore.flushChain
+      .catch(() => false)
+      .then(writePendingPersistentCache)
+      .catch(() => false);
     return persistentCacheStore.flushChain;
   }
 
@@ -5216,16 +5033,26 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           return idbTransactionDone(transaction);
         });
       } else {
-        batch.forEach(function (key) {
-          GM_setValue(key, persistentCacheStore.values.get(key));
-        });
+        write = Promise.resolve().then(() =>
+          Promise.all(batch.map((key) => Store.write(key, persistentCacheStore.values.get(key))))
+        );
       }
       return write
         .then(function () {
           return true;
         })
-        .catch(function (err) {
+        .catch(async function (err) {
+          persistentCacheStore.db?.close();
           persistentCacheStore.db = null;
+          if (persistentCacheStore.backend === "indexeddb") {
+            persistentCacheStore.backend = "gm";
+            try {
+              await Promise.all(batch.map((key) => Store.write(key, persistentCacheStore.values.get(key))));
+              return true;
+            } catch (_) {
+              /* If both stores are denied, retain entries in memory until the next flush. */
+            }
+          }
           batch.forEach(function (key) {
             persistentCacheStore.pending.add(key);
           });
@@ -5235,12 +5062,13 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     });
   }
 
+  // ─── Cache subsystem ───────────────────────────────────────────────────
   function purgeCache() {
     var now = Date.now();
     var changed = false;
     Object.keys(state.GL_imageCache).forEach(function (k) {
       var e = state.GL_imageCache[k];
-      if (!e || !e.ts || now - e.ts > IMAGE_CACHE_MAX_AGE) {
+      if (!e || !e.ts || now - e.ts >= IMAGE_CACHE_MAX_AGE) {
         delete state.GL_imageCache[k];
         changed = true;
       }
@@ -5252,7 +5080,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   }
 
   function putInCache(mediaId, url) {
-    if (!mediaId || !url) return;
+    if (!/^\d{1,30}$/.test(String(mediaId || "")) || !trustedURL(url)) return;
     var entry = { url: url, ts: Date.now() };
     var isNewPersistentEntry = !state.GL_imageCache[mediaId];
 
@@ -5292,7 +5120,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       }
       return null;
     }
-    return entry.url || null;
+    return trustedURL(entry.url);
   }
 
   function registerPerformanceObserver() {
@@ -5303,6 +5131,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         list.getEntries().forEach(function (entry) {
           if (entry.initiatorType !== "img") return;
           var u = entry.name || "";
+          if (!trustedURL(u)) return;
           if (!(u.indexOf("_e35") > -1 || u.indexOf("_e15") > -1 || u.indexOf(".webp?") > -1)) return;
           if (u.indexOf("_e35_s") > -1) return;
           if (/_[sp](\d+)x\1(?!\d)/.test(u)) return;
@@ -5310,32 +5139,53 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           if (id && !mediaCache.has(id)) putInCache(id, u);
         });
       });
-      perfObs.observe({ entryTypes: ["resource"] });
+      perfObs.observe({ type: "resource", buffered: true });
     } catch (e) {
       logger("PerformanceObserver unavailable:", e && e.message ? e.message : e);
     }
   }
 
+  // ─── Keyboard ──────────────────────────────────────────────────────────
   function quickDownloadFocusedPost() {
-    var pa = document.querySelector('a[href^="/p/"]');
-    if (!pa) {
-      Toasts.info("No post link found on this page.");
+    if (!state.pageLoaded) return;
+    const active = document.activeElement?.closest('[data-snig="canDownload"]');
+    const visible = Array.from(document.querySelectorAll('[data-snig="canDownload"]'))
+      .map((post) => {
+        const r = post.getBoundingClientRect();
+        return {
+          post,
+          height: Math.max(0, Math.min(innerHeight, r.bottom) - Math.max(0, r.top)),
+          dist: Math.abs((r.top + r.bottom - innerHeight) / 2)
+        };
+      })
+      .filter((x) => x.height > 0)
+      .sort((a, b) => b.height - a.height || a.dist - b.dist);
+    const art = active || visible[0]?.post;
+    const sc = art && getPostContextFromButton(art).postPath;
+    if (!sc) {
+      Toasts.info("No visible post is available.");
       return;
     }
-    var href = pa.getAttribute("href") || "";
-    var shortcode = href.split("/p/")[1];
-    if (!shortcode) return;
-    shortcode = shortcode.split("/")[0].split("?")[0];
-    var art = pa.closest('[data-snig="canDownload"]');
-    resolvePostShortcode(shortcode, { post: art || null }).then(function (loaded) {
+    resolvePostShortcode(sc, { post: art, complete: true }).then((loaded) => {
       if (!loaded) return;
-      var index = 0;
-      if (art) index = getVisibleNodeIndex($(art));
-      var item = loaded.items[index] || loaded.items[0];
-      if (item) {
-        downloadResource(item, Object.assign({}, loaded.meta, { sourceType: item.isVideo ? "video" : "photo" }), {});
-      }
+      const index = getVisibleNodeIndex($(art));
+      const item = selectedPostItem(loaded, index);
+      if (item) downloadResource(item, loaded.meta);
     });
+  }
+
+  function ignoreShortcut(e) {
+    const t = (e.originalEvent || e).composedPath?.()[0] || e.target;
+    return (
+      e.defaultPrevented ||
+      e.isDefaultPrevented?.() ||
+      e.repeat ||
+      e.originalEvent?.repeat ||
+      e.isComposing ||
+      e.originalEvent?.isComposing ||
+      t?.isContentEditable ||
+      !!t?.closest?.('input,textarea,select,[role="textbox"],[contenteditable]:not([contenteditable="false"])')
+    );
   }
 
   function toggleShortcutsHelp() {
@@ -5349,17 +5199,19 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       [getPlatformModifierKey() + " + K", "Command palette"],
       [(isMacOS() ? "\u2318" : "Ctrl") + " + K", "Command palette (browser-safe)"],
       ["Shift + ?", "Show / hide this overlay"],
-      [getPlatformModifierKey() + " + W", "Settings"],
-      [getPlatformModifierKey() + " + S", "Download story"],
+      [getPlatformModifierKey() + " + " + String.fromCharCode(state.settingsHotkeyKeyCode), "Settings"],
+      [getPlatformModifierKey() + " + " + String.fromCharCode(state.downloadStoryHotkeyKeyCode), "Download story"],
       [getPlatformModifierKey() + " + T", "Show tagged profiles"],
-      [getPlatformModifierKey() + " + Z", "Debug window"],
+      [getPlatformModifierKey() + " + " + String.fromCharCode(state.debugHotkeyKeyCode), "Debug window"],
       [getPlatformModifierKey() + " + R", "Reload " + NAME],
-      [getPlatformModifierKey() + " + Q", "Close dialogs"],
+      [getPlatformModifierKey() + " + Q", "Close dialogs"]
     ];
     var wrap = $('<div class="ignis-ksh">');
     var card = $('<div class="ignis-ksh-card">');
     card.append(
-      "<h3>" + NAME + " — Keyboard Shortcuts</h3><table>" +
+      "<h3>" +
+        NAME +
+        " — Keyboard Shortcuts</h3><table>" +
         rows
           .map(function (r) {
             return (
@@ -5381,24 +5233,30 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   }
 
   function installKeyboardShortcuts() {
-    if (window.__igKS) return;
-    window.__igKS = true;
     document.addEventListener("keydown", function (e) {
-      var tag = (e.target && e.target.tagName) || "";
-      if (tag === "INPUT" || tag === "TEXTAREA" || (e.target && e.target.isContentEditable)) return;
+      if (ignoreShortcut(e)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey || ModalStack.modals.length || document.querySelector(".ignis-palette"))
+        return;
       var k = e.key;
       if (e.shiftKey && k === "?" && USER_SETTING.KEYBOARD_SHORTCUTS_HELP) {
         e.preventDefault();
         toggleShortcutsHelp();
         return;
       }
-      if (k === "s" && !e.ctrlKey && !e.metaKey && USER_SETTING.KEYBOARD_DOWNLOAD_S) {
+      if (
+        state.pageLoaded &&
+        k === "s" &&
+        !e.shiftKey &&
+        !document.querySelector(".ignis-ksh") &&
+        USER_SETTING.KEYBOARD_DOWNLOAD_S
+      ) {
         e.preventDefault();
         quickDownloadFocusedPost();
       }
     });
   }
 
+  // ─── Command palette ───────────────────────────────────────────────────
   function toggleCommandPalette() {
     var existing = document.querySelector(".ignis-palette");
     if (existing) {
@@ -5406,9 +5264,22 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       existing.remove();
       return;
     }
+    const opener = document.activeElement;
     var actions = [
-      { label: "Open Settings", kw: "settings preferences options", fn: function () { showSetting(); } },
-      { label: "Download Statistics", kw: "stats usage numbers", fn: function () { showSetting("stats"); } },
+      {
+        label: "Open Settings",
+        kw: "settings preferences options",
+        fn: function () {
+          showSetting();
+        }
+      },
+      {
+        label: "Download Statistics",
+        kw: "stats usage numbers",
+        fn: function () {
+          showSetting("stats");
+        }
+      },
       { label: "Filename Template", kw: "rename file name format template", fn: openRenameEditor },
       { label: "About " + NAME, kw: "about version info", fn: showAbout },
       { label: "Debug Window", kw: "debug logs console", fn: showDebugDOM },
@@ -5419,9 +5290,16 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         fn: function () {
           if (state.route === "story") $(".ignis-sd").first().trigger("click");
           else Toasts.info("Open a story first.");
-        },
+        }
       },
-      { label: "Download All Stories", kw: "save story all batch", fn: function () { downloadStoriesAll("stories"); } },
+      {
+        label: "Download All Stories",
+        kw: "save story all batch",
+        fn: function () {
+          if (state.route === "story") downloadStoriesAll("stories");
+          else Toasts.info("Open a story first.");
+        }
+      },
       {
         label: "Show Tagged Profiles",
         kw: "story highlight mentions tagged profiles",
@@ -5429,11 +5307,17 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           if (state.route === "story") showTaggedProfiles("stories");
           else if (state.route === "highlights") showTaggedProfiles("highlights");
           else Toasts.info("Open a story or highlight first.");
-        },
+        }
       },
       { label: "Keyboard Shortcuts", kw: "shortcuts help keys overlay", fn: toggleShortcutsHelp },
-      { label: "Close Dialogs", kw: "close modals dismiss", fn: function () { ModalStack.closeTop(); } },
-      { label: "Reload " + NAME, kw: "reload restart refresh", fn: reloadScript },
+      {
+        label: "Close Dialogs",
+        kw: "close modals dismiss",
+        fn: function () {
+          ModalStack.closeTop();
+        }
+      },
+      { label: "Reload " + NAME, kw: "reload restart refresh", fn: reloadScript }
     ];
     var wrap = $('<div class="ignis-palette">');
     var card = $('<div class="ignis-pal-card">');
@@ -5475,6 +5359,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
     function close() {
       wrap.remove();
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
       $(document).off("keydown.igpal");
     }
     inp.on("input", function () {
@@ -5518,8 +5403,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   function installCommandPalette() {
     document.addEventListener("keydown", function (e) {
       if (!USER_SETTING.COMMAND_PALETTE) return;
-      var tag = (e.target && e.target.tagName) || "";
-      if (tag === "INPUT" || tag === "TEXTAREA" || (e.target && e.target.isContentEditable)) return;
+      if (ignoreShortcut(e)) return;
       if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         toggleCommandPalette();
@@ -5527,11 +5411,11 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     });
   }
 
+  // ─── Alt hotkeys ───────────────────────────────────────────────────────
   function installAltHotkeys() {
     $(window).on("keydown.igAlt", function (e) {
-      var tag = (e.target && e.target.tagName) || "";
-      if (tag === "INPUT" || tag === "TEXTAREA" || (e.target && e.target.isContentEditable)) return;
-      if (!e.altKey) return;
+      if (ignoreShortcut(e)) return;
+      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
       var code = e.keyCode || e.which;
       if (code === 81) {
         e.preventDefault();
@@ -5542,7 +5426,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       } else if (code === state.debugHotkeyKeyCode) {
         e.preventDefault();
         showDebugDOM();
-      } else if (code === 75) {
+      } else if (code === 75 && USER_SETTING.COMMAND_PALETTE) {
         e.preventDefault();
         toggleCommandPalette();
       } else if (code === 84) {
@@ -5557,30 +5441,21 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         e.preventDefault();
         if (state.route === "story") $(".ignis-sd").first().trigger("click");
         else if (state.route === "highlights") $(".ignis-hd").first().trigger("click");
-        else Toasts.info("Open a story first, then press " + getPlatformModifierKey() + "+S.");
+        else
+          Toasts.info(
+            "Open a story first, then press " + getPlatformModifierKey() + "+" + String.fromCharCode(code) + "."
+          );
       }
     });
   }
 
+  // ─── Reload & menu ─────────────────────────────────────────────────────
   function reloadScript() {
-    clearInterval(state.GL_repeat);
-    state.GL_repeat = null;
-    clearTimeout(state.postPoll);
-    state.postPoll = null;
-    $body.off(".ignisEvents");
+    $(document).off(".ignisEvents");
     state.bodyEventsRegistered = false;
-    $(".ignis-bar, .ignis-storytools, .ignis-sb, .ignis-sb-pos, .ignis-pd, .ignis-ksh, .ignis-palette, .ignis-gd").remove();
-    $(".ignis-modal").remove();
-    $("[data-snig]").removeAttr("data-snig");
-    state.pageLoaded = false;
-    state.firstStarted = false;
-    state.currentURL = location.href;
-    if (domObserver) domObserver.disconnect();
-    setTimeout(function () {
-      Router.enter();
-      installDomObserver();
-      scanAll();
-    }, 150);
+    registerBodyHandlers();
+    installDomObserver();
+    Router.enter();
     Toasts.info(NAME + " reloaded.");
   }
 
@@ -5591,16 +5466,19 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   function registerMenuCommand() {
     state.registerMenuIds.forEach(function (id) {
       try {
-        GM_unregisterMenuCommand(id);
+        Promise.resolve(manager.unmenu?.(id)).catch(() => {});
       } catch (e) {
-
+        /* ignore */
       }
     });
     state.registerMenuIds = [];
     function add(label, accessKey, fn) {
       try {
-        var id = GM_registerMenuCommand(label, fn, accessKey);
-        state.registerMenuIds.push(id);
+        if (manager.menu)
+          Promise.resolve(manager.menu(label, fn, accessKey)).then(
+            (id) => state.registerMenuIds.push(id),
+            () => {}
+          );
       } catch (e) {
         logger("menu registration failed:", label);
       }
@@ -5614,8 +5492,13 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     add("Reload Script", "r", reloadScript);
   }
 
-  function ignisBoot() {
+  // ─── Boot ──────────────────────────────────────────────────────────────
+  async function ignisBoot() {
+    if (state.booted) return;
+    state.booted = true;
     $body = $("body");
+    installStyle();
+    await Store.warm();
     initSettings();
     initPersistentCache().then(purgeCache);
     Stats.session();

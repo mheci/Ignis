@@ -3,7 +3,7 @@
      ============================================================ */
 
   const INTERNAL_CSS = `
-:root{
+:where(.ignis-modal,.ignis-toasts,.ignis-progress,.ignis-palette,.ignis-ksh,.ignis-bar,.ignis-storytools,.ignis-rd,.ignis-rn,.ignis-pd,.ignis-gd){
   --ig-brand:#f43f5e;
   --ig-brand-2:#fb923c;
   --ig-accent:#f97316;
@@ -25,7 +25,7 @@
   --ig-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
 @media (prefers-color-scheme:dark){
-  :root{
+  :where(.ignis-modal,.ignis-toasts,.ignis-progress,.ignis-palette,.ignis-ksh,.ignis-bar,.ignis-storytools,.ignis-rd,.ignis-rn,.ignis-pd,.ignis-gd){
     --ig-surface:#17171b;
     --ig-surface-2:#1f1f25;
     --ig-surface-3:#2a2a32;
@@ -206,9 +206,9 @@
 .ignis-sd svg,.ignis-sn svg,.ignis-sa svg,.ignis-st svg,.ignis-tp svg,.ignis-sl svg,.ignis-hd svg,.ignis-hn svg,.ignis-ha svg,.ignis-ht svg,.ignis-htp svg,.ignis-hl svg{width:17px;height:17px}
 .ignis-sb-pos{position:relative;z-index:12;min-width:28px;height:20px;padding:0 7px;border-radius:999px;background:rgba(16,16,20,.72);color:#fff;font:700 10px var(--ig-font);display:flex;align-items:center;justify-content:center;pointer-events:none;letter-spacing:.04em;border:1px solid rgba(255,255,255,.14);margin-top:1px}
 
-.ignis-rd{position:absolute;z-index:12;width:36px;height:36px;border:none;border-radius:11px;background:rgba(16,16,20,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.16);color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s;box-shadow:0 4px 14px rgba(0,0,0,.3)}
-.ignis-rd:hover{background:rgba(255,255,255,.18);transform:scale(1.05)}
-.ignis-rd svg{width:17px;height:17px}
+.ignis-rd,.ignis-rn{position:absolute;z-index:12;width:36px;height:36px;border:none;border-radius:11px;background:rgba(16,16,20,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.16);color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s;box-shadow:0 4px 14px rgba(0,0,0,.3)}
+.ignis-rd:hover,.ignis-rn:hover{background:rgba(255,255,255,.18);transform:scale(1.05)}
+.ignis-rd svg,.ignis-rn svg{width:17px;height:17px}
 .ignis-rn{position:absolute;z-index:12;width:36px;height:36px;border:none;border-radius:11px;background:rgba(16,16,20,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.16);color:#fff;display:grid;place-items:center;cursor:pointer;transition:all .12s;box-shadow:0 4px 14px rgba(0,0,0,.3)}
 .ignis-rn:hover{background:rgba(255,255,255,.18);transform:scale(1.05)}
 .ignis-rn svg{width:17px;height:17px}
@@ -248,10 +248,25 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   .ignis-actions{padding:4px 6px 8px}
   .ignis-row{padding:10px}
 }
+
+.ignis-position-host{position:relative}
+.ignis-template-link{background:none;color:inherit;font:inherit;border:0;padding:0;text-align:start;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.ignis-bar button:focus-visible,.ignis-storytools button:focus-visible,.ignis-modal button:focus-visible,.ignis-checkmark:focus-visible{outline:2px solid #e86829;outline-offset:2px}
+@media(prefers-reduced-motion:reduce){.ignis-modal,.ignis-modal-card,.ignis-toast,.ignis-palette *{transition:none!important;animation:none!important}}
 `;
 
 
-  GM_addStyle(INTERNAL_CSS);
+  function installStyle() {
+    if (typeof GM_addStyle === "function") {
+      try {
+        GM_addStyle(INTERNAL_CSS);
+        return;
+      } catch (_) {}
+    }
+    const style = document.createElement("style");
+    style.textContent = INTERNAL_CSS;
+    (document.head || document.documentElement).appendChild(style);
+  }
 
   // ─── Modal stack ───────────────────────────────────────────────────────
   const ModalStack = {
@@ -272,8 +287,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
 
   function createModal(opts) {
     opts = opts || {};
+    const opener = document.activeElement;
+    let closed = false,
+      endDrag = null;
     var root = $('<div class="ignis-modal">');
     var card = $('<div class="ignis-modal-card" role="dialog" aria-modal="true">');
+    card.attr("aria-label", opts.title || "IGNIS");
     var head = $('<div class="ignis-modal-head">');
     var title = $('<div class="ignis-modal-title">');
     if (opts.title) title.append(esc(opts.title));
@@ -297,6 +316,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       foot: foot,
       title: title,
       close: function () {
+        if (closed) return;
+        closed = true;
+        if (endDrag) endDrag();
+        const restore = root[0].contains(document.activeElement);
+        root[0].inert = true;
+        if (restore && opener?.isConnected) opener.focus({ preventScroll: true });
         root.removeClass("ignis-modal-in");
         setTimeout(function () {
           root.remove();
@@ -304,11 +329,29 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         var i = ModalStack.modals.indexOf(api);
         if (i > -1) ModalStack.modals.splice(i, 1);
         $(document).off("keydown.igmodal", onKey);
-      },
+      }
     };
     function onKey(e) {
+      if (closed || ModalStack.modals.at(-1) !== api || document.querySelector(".ignis-palette")) return;
+      if (e.key === "Tab") {
+        const nodes = card
+          .find(
+            'button:enabled:visible,input:enabled:visible,textarea:visible,a[href]:visible,[tabindex="0"]:visible'
+          )
+          .toArray()
+          .filter((n) => n.tabIndex >= 0);
+        const first = nodes[0],
+          last = nodes.at(-1);
+        if (first && e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (last && !e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+        return;
+      }
       if (e.key !== "Escape") return;
-      if (ModalStack.modals[ModalStack.modals.length - 1] !== api) return;
       e.preventDefault();
       api.close();
     }
@@ -331,14 +374,16 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         var maxY = Math.max(8, window.innerHeight - 48);
         card.css({
           left: Math.min(maxX, Math.max(8, ox + ev.clientX - sx)) + "px",
-          top: Math.min(maxY, Math.max(8, oy + ev.clientY - sy)) + "px",
+          top: Math.min(maxY, Math.max(8, oy + ev.clientY - sy)) + "px"
         });
       }
       function onUp() {
         $(document).off("mousemove.igdrag", onMove);
         $(document).off("mouseup.igdrag", onUp);
         card.css("transition", "");
+        endDrag = null;
       }
+      endDrag = onUp;
       $(document).on("mousemove.igdrag", onMove);
       $(document).on("mouseup.igdrag", onUp);
     });
@@ -346,7 +391,9 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       if (e.target === root[0]) api.close();
     });
     setTimeout(function () {
+      if (closed) return;
       root.addClass("ignis-modal-in");
+      if (ModalStack.modals.at(-1) === api && !root[0].contains(document.activeElement)) closeBtn.trigger("focus");
     }, 10);
     return ModalStack.push(api);
   }
@@ -354,109 +401,65 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   // ─── Post download dialog ──────────────────────────────────────────────
   function buildPostItems(payload, postPath) {
     var res = normalizePostResource(payload.resource);
-    res.items.forEach(function (it) {
-      if (it.dash) state.GL_mediaDataCache[it.id] = it.dash;
-    });
     return {
       items: res.items,
       meta: {
         username: res.username || "NONE",
+        uid: res.uid,
         shortcode: res.shortcode || postPath,
         sourceType: "post",
         timestamp: res.takenAt || Math.floor(Date.now() / 1000),
-        caption: res.caption || null,
+        caption: res.caption || null
       },
-      fromDom: false,
+      fromDom: false
     };
   }
 
   function extractPostFromDom(postPath, ctx) {
     var $post = null;
-    if (ctx && ctx.post) {
-      $post = $(ctx.post);
-    } else if (ctx && ctx.anchor) {
-      var a = ctx.anchor;
-      var img = a.querySelector("img");
-      if (img) {
-        var srcset = parseSrcset(img.getAttribute("srcset") || "");
-        var url = (srcset.length ? srcset[srcset.length - 1].url : null) || img.getAttribute("src") || "";
-        if (url) {
-          return {
-            items: [
-              {
-                id: decodeMediaIdFromUrl(url),
-                isVideo: false,
-                url: url,
-                thumb: url,
-                width: 0,
-                height: 0,
-                caption: null,
-                dash: null,
-                ext: /\.webp(\?|$)/i.test(url) ? "webp" : "jpg",
-              },
-            ],
-            meta: {
-              username: "NONE",
-              shortcode: postPath,
-              sourceType: "post",
-              timestamp: Math.floor(Date.now() / 1000),
-              caption: null,
-            },
-            fromDom: true,
-          };
-        }
-      }
-      return null;
-    } else {
+    if (ctx?.post || ctx?.anchor) $post = $(ctx.post || ctx.anchor);
+    else
       $post = $('[data-snig="canDownload"]')
-        .filter(function () {
-          return $(this).find('a[href*="/' + postPath + '/"]').length > 0;
-        })
+        .filter((_, el) => Array.from(el.querySelectorAll("a[href]")).some((a) => postCode(a.href) === postPath))
         .first();
-    }
-    if (!$post || !$post.length) return null;
-    if ($post.find("video[src^='blob:']").length) return null;
-    var items = [];
-    var seen = new Set();
-    var username = $post.attr("data-username") || getPostUsername($post) || "NONE";
-    $post.find("img[src]").each(function () {
-      var r = this.getBoundingClientRect();
-      if (r.width < 150 || r.height < 150) return;
-      var $img = $(this);
-      var srcset = parseSrcset($img.attr("srcset") || "");
-      var url = (srcset.length ? srcset[srcset.length - 1].url : null) || $img.attr("src") || "";
-      if (!url || seen.has(url)) return;
-      seen.add(url);
+    if (!$post?.length) return null;
+    const items = [],
+      seen = new Set(),
+      username = getPostUsername($post) || "NONE";
+    // Walk images and videos in their actual carousel order. A blob video is not
+    // itself a downloadable URL, and must not hide its downloadable neighbours.
+    $post.find("img, video").each(function () {
+      if (this.closest("header,nav,.ignis-modal,.ignis-bar")) return;
+      const rect = this.getBoundingClientRect(),
+        video = this.tagName === "VIDEO";
+      if (!video && (rect.width < 150 || rect.height < 100)) return;
+      const url = video
+        ? trustedURL(this.currentSrc || this.src || this.querySelector("source[src]")?.src)
+        : domImage(this);
+      const li = this.closest("li");
+      const pos = slideOrdinal(li) || items.length + 1,
+        identity = (li ? pos + ":" : "") + url;
+      if (!url || seen.has(identity)) return;
+      seen.add(identity);
       items.push({
         id: decodeMediaIdFromUrl(url),
-        isVideo: false,
-        url: url,
-        thumb: url,
-        width: Math.round(r.width),
-        height: Math.round(r.height),
+        isVideo: video,
+        url,
+        thumb: video ? trustedURL(this.poster) : url,
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
         caption: null,
         dash: null,
-        ext: /\.webp(\?|$)/i.test(url) ? "webp" : "jpg",
+        ext: mediaExtension(url, video ? "mp4" : "jpg"),
+        _igSourceIndex: pos
       });
     });
-    var $v = $post.find("video").first();
-    if ($v.length) {
-      var vUrl = $v.attr("src") || "";
-      if (/^https?:/i.test(vUrl)) {
-        items.push({
-          id: decodeMediaIdFromUrl(vUrl),
-          isVideo: true,
-          url: vUrl,
-          thumb: null,
-          width: 0,
-          height: 0,
-          caption: null,
-          dash: null,
-          ext: "mp4",
-        });
-      }
-    }
     if (!items.length) return null;
+    if (items.length === 1 && postCode(location.href) === postPath) {
+      const index = Number(new URL(location.href).searchParams.get("img_index"));
+      if (Number.isSafeInteger(index) && index > 0 && !$post.find("li[aria-posinset],li[style*=translate]").length)
+        items[0]._igSourceIndex = index;
+    }
     var ts = Math.floor(Date.now() / 1000);
     var $t = $post.find("time[datetime]").first();
     if ($t.length) {
@@ -466,15 +469,22 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     return {
       items: items,
       meta: { username: username, shortcode: postPath, sourceType: "post", timestamp: ts, caption: null },
-      fromDom: true,
+      fromDom: true
     };
   }
 
   async function loadPostItems(postPath, ctx) {
-    var instant = extractPostFromDom(postPath, ctx);
-    if (instant) return instant;
-    var payload = await getPostPayload(postPath);
-    return buildPostItems(payload, postPath);
+    const embedded = extractPostFromPageJson(postPath);
+    if (embedded) return buildPostItems(embedded, postPath);
+    const instant = extractPostFromDom(postPath, ctx);
+    if (instant && (!ctx?.complete || !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA)) return instant;
+    try {
+      const rich = buildPostItems(await getPostPayload(postPath, true), postPath);
+      if (rich.items.length || !instant) return rich;
+    } catch (e) {
+      if (!instant || e.stopLookup) throw e;
+    }
+    return instant;
   }
 
   function renderItems(body, items, meta) {
@@ -485,7 +495,8 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
     var grid = $('<div class="ignis-grid">');
     items.forEach(function (item, i) {
-      item._igSourceIndex = i + 1;
+      item._igSourceIndex ||= i + 1;
+      const caption = item.caption || meta.caption;
       var row = $('<div class="ignis-item is-selected" data-idx="' + i + '">');
       var input = $('<input type="checkbox" checked tabindex="-1" aria-hidden="true">');
       var media = $('<div class="ignis-card-media">');
@@ -506,70 +517,84 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         esc(dims) +
         esc(item.ext || "") +
         "</span></div>";
-      var cap = item.caption
-        ? '<div class="ignis-cap">' + esc(item.caption.slice(0, 180)) + "</div>"
-        : "";
+      var cap = caption ? '<div class="ignis-cap">' + esc(caption.slice(0, 180)) + "</div>" : "";
       var actions = $('<div class="ignis-actions">');
       actions.append(
         '<button class="ignis-act ig-act-dl" title="Download" aria-label="Download">' + SVG.DOWNLOAD + "</button>",
-        '<button class="ignis-act ig-act-nt" title="Open in new tab" aria-label="Open in new tab">' + SVG.NEW_TAB + "</button>"
+        '<button class="ignis-act ig-act-nt" title="Open in new tab" aria-label="Open in new tab">' +
+          SVG.NEW_TAB +
+          "</button>"
       );
       if (item.thumb && item.isVideo) {
         actions.append(
-          '<button class="ignis-act ig-act-th" title="Download thumbnail" aria-label="Download thumbnail">' + SVG.THUMBNAIL + "</button>"
+          '<button class="ignis-act ig-act-th" title="Download thumbnail" aria-label="Download thumbnail">' +
+            SVG.THUMBNAIL +
+            "</button>"
         );
       }
-      if (item.caption) {
+      if (caption) {
         actions.append(
-          '<button class="ignis-act ig-act-cap" title="Download caption (.txt)" aria-label="Download caption">' + SVG.TEXT + "</button>"
+          '<button class="ignis-act ig-act-cap" title="Download caption (.txt)" aria-label="Download caption">' +
+            SVG.TEXT +
+            "</button>"
         );
       }
       row.append(input, media, $('<div class="ignis-card-body">').append(type, cap), actions);
       grid.append(row);
     });
     body.append(grid);
-    body.off(".igitem").on("click.igitem", ".ignis-item", function (e) {
-      if ($(e.target).closest(".ignis-checkmark").length) {
-        var cb = $(this).find('input[type="checkbox"]')[0];
-        if (cb) {
-          cb.checked = !cb.checked;
-          $(this).toggleClass("is-selected", cb.checked);
-          $(e.target).closest(".ignis-checkmark").attr("aria-checked", cb.checked ? "true" : "false");
-          $(cb).trigger("change");
+    body
+      .off(".igitem")
+      .on("click.igitem", ".ignis-item", function (e) {
+        if ($(e.target).closest(".ignis-checkmark").length) {
+          var cb = $(this).find('input[type="checkbox"]')[0];
+          if (cb) {
+            cb.checked = !cb.checked;
+            $(this).toggleClass("is-selected", cb.checked);
+            $(e.target)
+              .closest(".ignis-checkmark")
+              .attr("aria-checked", cb.checked ? "true" : "false");
+            $(cb).trigger("change");
+          }
+          e.preventDefault();
+          return;
         }
-        e.preventDefault();
-        return;
-      }
-      var act = $(e.target).closest(".ignis-act")[0];
-      if (!act) return;
-      e.stopPropagation();
-      var idx = parseInt($(this).attr("data-idx"), 10);
-      var item = items[idx];
-      if (!item) return;
-      var photoMeta = Object.assign({}, meta, {
-        sourceType: item.isVideo ? "video" : "photo",
-        index: item._igSourceIndex || idx + 1,
+        var act = $(e.target).closest(".ignis-act")[0];
+        if (!act) return;
+        e.stopPropagation();
+        var idx = parseInt($(this).attr("data-idx"), 10);
+        var item = items[idx];
+        if (!item) return;
+        var photoMeta = Object.assign({}, meta, {
+          sourceType: meta.sourceType === "post" ? (item.isVideo ? "video" : "photo") : meta.sourceType,
+          shortcode: meta.sourceType === "stories" || meta.sourceType === "highlights" ? item.id : meta.shortcode,
+          timestamp: item.takenAt || meta.timestamp,
+          index: item._igSourceIndex || idx + 1
+        });
+        if (act.classList.contains("ig-act-dl")) {
+          downloadResource(item, photoMeta, {});
+        } else if (act.classList.contains("ig-act-nt")) {
+          downloadResource(item, photoMeta, { preview: true });
+        } else if (act.classList.contains("ig-act-th") && item.thumb) {
+          saveFiles(item.thumb, Object.assign({}, photoMeta, { sourceType: "thumbnail", filetype: "jpg" }));
+        } else if (act.classList.contains("ig-act-cap") && (item.caption || meta.caption)) {
+          const text = item.caption || meta.caption;
+          const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+          const capMeta = { ...photoMeta, filetype: "txt" };
+          resolveFilenameUID(capMeta)
+            .then((meta) => triggerDownload(blob, getSaveFileName(item.url, meta)))
+            .then(
+              () => Stats.record("caption", blob.size),
+              () => Toasts.error("Could not save caption.")
+            );
+        }
+      })
+      .on("keydown.igitem", ".ignis-checkmark", function (e) {
+        if (e.key === " " || e.key === "Enter") {
+          e.preventDefault();
+          $(this).trigger("click");
+        }
       });
-      if (act.classList.contains("ig-act-dl")) {
-        downloadResource(item, photoMeta, {});
-      } else if (act.classList.contains("ig-act-nt")) {
-        downloadResource(item, photoMeta, { preview: true });
-      } else if (act.classList.contains("ig-act-th") && item.thumb) {
-        saveFiles(item.thumb, Object.assign({}, meta, { sourceType: "thumbnail", filetype: "jpg" }));
-      } else if (act.classList.contains("ig-act-cap") && item.caption) {
-        var capMeta = Object.assign({}, photoMeta, { caption: item.caption, filetype: "txt" });
-        triggerDownload(
-          new Blob([item.caption], { type: "text/plain;charset=utf-8" }),
-          getSaveFileName(item.url, capMeta)
-        );
-        Stats.record("caption", 0);
-      }
-    }).on("keydown.igitem", ".ignis-checkmark", function (e) {
-      if (e.key === " " || e.key === "Enter") {
-        e.preventDefault();
-        $(this).trigger("click");
-      }
-    });
   }
 
   function attachSelectionFooter(modal, getItems, getMeta, extra) {
@@ -577,12 +602,8 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       '<label class="ignis-sel" title="Select / deselect all"><input type="checkbox" checked><span></span>Select all<b class="ignis-count"></b></label>'
     );
     var countBadge = selectAll.find(".ignis-count");
-    var dlSel = $(
-      '<button class="ignis-btn ignis-btn-pri" disabled>' + SVG.DOWNLOAD + " Download Selected</button>"
-    );
-    var dlAll = $(
-      '<button class="ignis-btn ignis-btn-sec">' + SVG.DOWNLOAD_ALL + " Download All</button>"
-    );
+    var dlSel = $('<button class="ignis-btn ignis-btn-pri" disabled>' + SVG.DOWNLOAD + " Download Selected</button>");
+    var dlAll = $('<button class="ignis-btn ignis-btn-sec">' + SVG.DOWNLOAD_ALL + " Download All</button>");
 
     function refresh() {
       var checks = modal.body.find('.ignis-item input[type="checkbox"]');
@@ -592,10 +613,13 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       selectAll.find("input").prop("indeterminate", selected > 0 && selected < total);
       countBadge.text(total ? selected + "/" + total : "");
       dlSel.prop("disabled", selected === 0);
+      dlAll.prop("disabled", total === 0);
       modal.body.find(".ignis-item").each(function () {
         var checked = !!$(this).find('input[type="checkbox"]').prop("checked");
         $(this).toggleClass("is-selected", checked);
-        $(this).find(".ignis-checkmark").attr("aria-checked", checked ? "true" : "false");
+        $(this)
+          .find(".ignis-checkmark")
+          .attr("aria-checked", checked ? "true" : "false");
       });
     }
 
@@ -635,48 +659,29 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
   }
 
   async function openPostDialog(postPath, ctx) {
-    var modal = createModal({ title: "Download post", sub: postPath });
+    const modal = createModal({ title: "Download post", sub: postPath });
     modal.body.append('<div class="ignis-load"><i></i>Loading media…</div>');
-    var loaded;
+    let loaded;
     try {
-      loaded = await loadPostItems(postPath, ctx);
+      loaded = ctx?.initial || (await loadPostItems(postPath, { ...ctx, complete: true }));
     } catch (e) {
-      modal.body.empty().append(
-        '<div class="ignis-empty">Could not load this post: ' + esc((e && e.message) || "network error") + "</div>"
-      );
+      modal.body.empty().append($("<div class='ignis-empty'>").text("Could not load this post: " + e.message));
       return null;
     }
-    if (!modal.el.is(":visible")) return loaded;
-    var current = { items: loaded.items, meta: loaded.meta };
-    function updateHead() {
-      var user = current.meta && current.meta.username && current.meta.username !== "NONE" ? "@" + current.meta.username + " · " : "";
-      modal.title.find(".ignis-sub").text(user + current.items.length + " item" + (current.items.length === 1 ? "" : "s"));
-    }
-    renderItems(modal.body, current.items, current.meta);
-    updateHead();
-    var selection = attachSelectionFooter(
+    if (!modal.el[0].isConnected || modal.el[0].inert) return null;
+    const { items, meta } = loaded;
+    const author = meta.username && meta.username !== "NONE" ? "@" + meta.username + " · " : "";
+    modal.title.find(".ignis-sub").text(author + items.length + (items.length === 1 ? " item" : " items"));
+    renderItems(modal.body, items, meta);
+    if (loaded.fromDom)
+      modal.body.prepend(
+        '<p class="ignis-hint">Showing only media loaded on this page. The full post may contain more items.</p>'
+      );
+    attachSelectionFooter(
       modal,
-      function () {
-        return current.items;
-      },
-      function () {
-        return current.meta;
-      }
+      () => items,
+      () => meta
     );
-    if (loaded.fromDom) {
-      getPostPayload(postPath)
-        .then(function (payload) {
-          var rich = buildPostItems(payload, postPath);
-          if (rich.items.length && modal.el.is(":visible")) {
-            current.items = rich.items;
-            current.meta = rich.meta;
-            renderItems(modal.body, current.items, current.meta);
-            updateHead();
-            selection.refresh();
-          }
-        })
-        .catch(function () {});
-    }
     return loaded;
   }
 
@@ -801,8 +806,8 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
 
   // ─── Dashboard settings ────────────────────────────────────────────────
   function showSetting(tab) {
-    if (tab) state._igTab = tab;
-    if (!CAT_MAP[state._igTab] && state._igTab !== "about") state._igTab = "download";
+    if (typeof tab === "string") state._igTab = tab;
+    if (!CATS.some((c) => c[0] === state._igTab) && state._igTab !== "about") state._igTab = "download";
     while (ModalStack.modals.length) ModalStack.pop();
     $(".ignis-modal").remove();
     var modal = createModal({ title: NAME + " Settings", sub: "v" + VERSION });
@@ -811,8 +816,14 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     var search = $('<input class="ignis-search" type="search" placeholder="Search settings…">');
     var list = $("<div>");
     var hero = $(
-      '<div class="ignis-hero"><div class="ignis-hero-mark">' + SVG.SPARK + "</div>" +
-        "<div><h3>" + esc(NAME) + "</h3><p>Instagram media downloader · v" + esc(VERSION) + "</p></div></div>"
+      '<div class="ignis-hero"><div class="ignis-hero-mark">' +
+        SVG.SPARK +
+        "</div>" +
+        "<div><h3>" +
+        esc(NAME) +
+        "</h3><p>Instagram media downloader · v" +
+        esc(VERSION) +
+        "</p></div></div>"
     );
     modal.body.append(hero, tabs, search, list);
 
@@ -857,19 +868,23 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       var keys = [
         ["settings", "Open Settings", "settingsHotkeyKeyCode"],
         ["downloadStory", "Download Story", "downloadStoryHotkeyKeyCode"],
-        ["debug", "Debug Window", "debugHotkeyKeyCode"],
+        ["debug", "Debug Window", "debugHotkeyKeyCode"]
       ];
       keys.forEach(function (k) {
         var code = state[k[2]];
         var row = $('<div class="ignis-keyrow" data-hotkey="' + k[2] + '">');
         row.append(
-          '<span class="ignis-kbd"><kbd>' + esc(getPlatformModifierKey()) + "</kbd>+<kbd>" + esc(keyName(code)) + "</kbd></span>",
+          '<span class="ignis-kbd"><kbd>' +
+            esc(getPlatformModifierKey()) +
+            "</kbd>+<kbd>" +
+            esc(keyName(code)) +
+            "</kbd></span>",
           $('<div class="ignis-row-txt"><div class="ignis-row-lb">' + esc(k[1]) + "</div></div>"),
           $('<button type="button">Rebind</button>')
         );
         row.on("click", function () {
           container.data("cap", k[2]);
-          row.find("button").text("Press a key…");
+          row.find("button").text("Press a key…").trigger("focus");
         });
         container.append(row);
       });
@@ -890,7 +905,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       thumbnail: "Thumbnails",
       avatar: "Profile Pictures",
       caption: "Captions",
-      other: "Other",
+      other: "Other"
     };
 
     function formatBytes(n) {
@@ -923,7 +938,7 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         ["Total downloads", String(s.items || 0)],
         ["Data saved", formatBytes(s.bytes)],
         ["Sessions", String(s.sessions || 0)],
-        ["Last download", s.lastAt ? new Date(s.lastAt).toLocaleDateString() : "—"],
+        ["Last download", s.lastAt ? new Date(s.lastAt).toLocaleDateString() : "—"]
       ].forEach(function (pair) {
         cards.append(
           '<div class="ignis-stat-card"><small>' +
@@ -981,11 +996,16 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     }
 
     function buildList(filter) {
-      list.empty();
+      filter = (filter ?? search.val()).trim().toLowerCase();
+      list.empty().removeData("cap");
       if (state._igTab === "about") {
         list.append(
           '<div class="ignis-about">' +
-            "<b>" + NAME + " v" + VERSION + "</b> downloads media from Instagram pages: posts, carousels, reels, stories, highlights, HD avatars and captions." +
+            "<b>" +
+            NAME +
+            " v" +
+            VERSION +
+            "</b> downloads media from Instagram pages: posts, carousels, reels, stories, highlights, HD avatars and captions." +
             '<div class="ignis-rt">' +
             ["IGNIS Core", "IGNIS Lens", "IGNIS Forge", "IGNIS Render", "IGNIS Pulse"]
               .map(function (r) {
@@ -1003,13 +1023,14 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
         return;
       }
       if (state._igTab === "keyboard") {
-        renderHotkeyEditor(list);
-        return;
+        if (!filter) renderHotkeyEditor(list);
       }
       if (state._igTab === "stats") {
-        list.append(buildStatsPanel(function () {
-          buildList(filter);
-        }));
+        list.append(
+          buildStatsPanel(function () {
+            buildList(filter);
+          })
+        );
       }
       Object.keys(CAT_MAP)
         .filter(function (k) {
@@ -1024,26 +1045,34 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
           Object.keys(PARENT_CHILD_MAPPING).forEach(function (p) {
             if (PARENT_CHILD_MAPPING[p].indexOf(k) > -1) parent = p;
           });
-          var disabled = parent ? !USER_SETTING[parent] : false;
+          var disabled = parent
+            ? !USER_SETTING[parent] || (parent === "PREFER_DASH_MANIFEST" && !USER_SETTING.FORCE_RESOURCE_VIA_MEDIA)
+            : false;
           var row = $(
             '<div class="ignis-row ignis-row-wrap' + (disabled ? " ignis-row-dis" : "") + '" data-set="' + k + '">'
           );
           var sw = $(
-            '<label class="ignis-sw"><input type="checkbox" aria-label="' + esc(LABEL[k]) + '" ' +
+            '<label class="ignis-sw"><input type="checkbox" aria-label="' +
+              esc(LABEL[k]) +
+              '" ' +
               (USER_SETTING[k] ? "checked" : "") +
-              (disabled ? "disabled" : "") +
+              (disabled ? " disabled" : "") +
               "><i></i></label>"
           );
           row.append(
-            $('<div class="ignis-row-txt">')
-              .append(
-                '<div class="ignis-row-lb">' + esc(LABEL[k]) + "</div>",
-                '<div class="ignis-row-ds">' + esc(DESC[k]) + "</div>"
-              ),
+            $('<div class="ignis-row-txt">').append(
+              '<div class="ignis-row-lb">' + esc(LABEL[k]) + "</div>",
+              '<div class="ignis-row-ds">' + esc(DESC[k]) + "</div>"
+            ),
             sw
           );
           if (k === "AUTO_RENAME") {
-            row.find(".ignis-row-txt").css("cursor", "pointer").on("click", openRenameEditor);
+            row
+              .find(".ignis-row-lb")
+              .empty()
+              .append(
+                $('<button type="button" class="ignis-template-link">').text(LABEL[k]).on("click", openRenameEditor)
+              );
           }
           list.append(row);
         });
@@ -1058,8 +1087,27 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       e.preventDefault();
       e.stopPropagation();
       var code = e.keyCode || e.which;
+      if (e.key === "Escape") {
+        buildList();
+        return;
+      }
+      const keys = {
+        settingsHotkeyKeyCode: "SETTINGS",
+        downloadStoryHotkeyKeyCode: "DOWNLOAD_STORY",
+        debugHotkeyKeyCode: "DEBUG"
+      };
+      if (
+        !Object.hasOwn(keys, cap) ||
+        code < 65 ||
+        code > 90 ||
+        [81, 75, 84, 82].includes(code) ||
+        Object.keys(keys).some((k) => k !== cap && state[k] === code)
+      ) {
+        Toasts.info("Choose an unused letter, or Escape to cancel.");
+        return;
+      }
       state[cap] = code;
-      Store.set("G_HOTKEY_" + cap.replace("HotkeyKeyCode", "").toUpperCase() + "_KEYCODE", code);
+      Store.set("G_HOTKEY_" + keys[cap] + "_KEYCODE", code);
       list.data("cap", null);
       buildList();
     });
@@ -1075,10 +1123,10 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     });
 
     modal.el.on("contextmenu.igset", ".ignis-row[data-set]", function (e) {
-      e.preventDefault();
       var $row = $(this);
       var k = $row.attr("data-set");
       if (k !== "AUTO_RENAME") return;
+      e.preventDefault();
       openRenameEditor();
     });
 
@@ -1108,9 +1156,12 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
     modal.foot.append(
       $('<button class="ignis-btn ignis-btn-sec">Copy</button>').on("click", function () {
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(ta.val()).then(function () {
-            Toasts.success("Copied to clipboard.");
-          });
+          navigator.clipboard.writeText(ta.val()).then(
+            function () {
+              Toasts.success("Copied to clipboard.");
+            },
+            () => Toasts.error("Clipboard unavailable; select the text to copy.")
+          );
         } else {
           ta.trigger("select");
           document.execCommand("copy");
@@ -1118,11 +1169,13 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       }),
       $('<button class="ignis-btn ignis-btn-sec">Download</button>').on("click", function () {
         var blob = new Blob([ta.val()], { type: "text/plain;charset=utf-8" });
-        triggerDownload(blob, "ignis-debug-" + Date.now() + ".txt");
+        triggerDownload(blob, "ignis-debug-" + Date.now() + ".txt").catch(() =>
+          Toasts.error("Could not save debug log.")
+        );
       })
     );
     var lines = [];
-    lines.push(NAME + " v" + VERSION + " — URL: " + location.href);
+    lines.push(NAME + " v" + VERSION + " — URL: " + location.origin + location.pathname);
     lines.push("UA: " + navigator.userAgent);
     lines.push("");
     lines.push("— Log —");
@@ -1130,13 +1183,4 @@ a:hover>.ignis-gd,.ignis-gd:focus-visible,.ignis-gd:hover{opacity:1;transform:sc
       lines.push("[" + new Date(entry.time).toISOString() + "] " + entry.content.map(String).join(" "));
     });
     ta.val(lines.join("\n"));
-  }
-
-  function showFeedbackDOM() {
-    var modal = createModal({ title: "About", sub: NAME + " v" + VERSION });
-    modal.body.append(
-      '<div class="ignis-about">' +
-        NAME +
-        " is an independent, self-contained userscript. It sends no data anywhere and is not affiliated with any other project or maintainer.</div>"
-    );
   }
