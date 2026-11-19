@@ -17,7 +17,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,7 +37,15 @@ jobs:
         run: |
           /usr/bin/python3.12 -m venv "$RUNNER_TEMP/ignis-venv"
           "$RUNNER_TEMP/ignis-venv/bin/python" -m pip install --only-binary=:all: --require-hashes -r tests/requirements-browser.txt
-          if ! command -v ffprobe >/dev/null; then sudo apt-get update && sudo apt-get install -y ffmpeg; fi
+          if ! command -v ffprobe >/dev/null || ! command -v ffmpeg >/dev/null; then
+            # The runner's regional mirror can stall; use the canonical Ubuntu
+            # archive with bounded retries and avoid optional dependencies.
+            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g; s|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
       - name: Exercise the committed bundle in Chromium with offline page and media fixtures
         run: '"$RUNNER_TEMP/ignis-venv/bin/python" tests/browser.py --chrome "$(command -v google-chrome || command -v chromium)" --out "$RUNNER_TEMP/ignis-browser"'
       - name: Retain browser test receipts
